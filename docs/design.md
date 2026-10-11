@@ -94,9 +94,11 @@ For each selected VM:
 
 Step 4 only runs if the connector is still alive. If plakar is killed or the machine
 running it loses power, the snapshot stays on the host and keeps its storage. So every
-snapshot the connector takes is marked with `plakar_xcpng_snapshot` in its `other_config`,
+snapshot the connector takes is marked with `plakar_xcpng_snapshot=<its own UUID>` in its
+`other_config` (XAPI copies `other_config` on clone and revert, and a copied marker no
+longer matches the UUID of the object it lands on),
 and before step 1 the importer destroys the VM's marked snapshots older than
-`stale_snapshot_age`, with their VDIs. Snapshots without the marker are never touched,
+`stale_snapshot_age`, with their VDIs, destroying only VDIs that are snapshot copies. Snapshots without the marker are never touched,
 whatever their name. The age threshold exists because two backups of the same VM can
 overlap; it has to be longer than the longest backup of one VM.
 

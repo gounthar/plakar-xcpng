@@ -213,7 +213,14 @@ func (p *Importer) backupVM(ctx context.Context, vmRef string, records chan<- *c
 	if err := p.client.Call(ctx, &snapRef, "VM.snapshot", vmRef, label); err != nil {
 		return fmt.Errorf("snapshot of VM %s: %w", vmUUID, err)
 	}
-	if err := p.client.Call(ctx, nil, "VM.add_to_other_config", snapRef, snapshotMarker, "true"); err != nil {
+	// The marker holds the snapshot's own UUID: other_config is copied by clone and
+	// revert, and a copied marker must not make another snapshot look like ours.
+	var snapUUID string
+	if err := p.client.Call(ctx, &snapUUID, "VM.get_uuid", snapRef); err != nil {
+		return errors.Join(fmt.Errorf("snapshot of VM %s: %w", vmUUID, err),
+			p.destroySnapshot(context.WithoutCancel(ctx), snapRef))
+	}
+	if err := p.client.Call(ctx, nil, "VM.add_to_other_config", snapRef, snapshotMarker, snapUUID); err != nil {
 		return errors.Join(fmt.Errorf("marking snapshot of VM %s: %w", vmUUID, err),
 			p.destroySnapshot(context.WithoutCancel(ctx), snapRef))
 	}
@@ -399,6 +406,7 @@ func (p *Importer) vifs(ctx context.Context, vmRef string) ([]xapi.VIFMeta, erro
 }
 
 type snapshotSummary struct {
+	UUID         string            `json:"uuid"`
 	OtherConfig  map[string]string `json:"other_config"`
 	SnapshotTime string            `json:"snapshot_time"`
 }
@@ -420,7 +428,7 @@ func (p *Importer) destroyStaleSnapshots(ctx context.Context, vmRef string) erro
 			errs = append(errs, err)
 			continue
 		}
-		if _, ok := s.OtherConfig[snapshotMarker]; !ok {
+		if s.OtherConfig[snapshotMarker] != s.UUID || s.UUID == "" {
 			continue
 		}
 		t, err := xapi.ParseTime(s.SnapshotTime)
@@ -445,7 +453,15 @@ func (p *Importer) destroySnapshot(ctx context.Context, snapRef string) error {
 		if err := p.client.Call(ctx, &vbd, "VBD.get_record", vbdRef); err != nil {
 			return fmt.Errorf("cleanup of snapshot %s: %w", snapRef, err)
 		}
-		if vbd.Type == "Disk" && vbd.VDI != xapi.NullRef {
+		if vbd.Type != "Disk" || vbd.VDI == xapi.NullRef {
+			continue
+		}
+		// Only snapshot copies: never a VDI the snapshot merely shares with a VM.
+		var isSnap bool
+		if err := p.client.Call(ctx, &isSnap, "VDI.get_is_a_snapshot", vbd.VDI); err != nil {
+			return fmt.Errorf("cleanup of snapshot %s: %w", snapRef, err)
+		}
+		if isSnap {
 			vdis = append(vdis, vbd.VDI)
 		}
 	}
