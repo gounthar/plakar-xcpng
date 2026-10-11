@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Plakar XCP-ng Exporter Connector Config",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "location",
+    "password"
+  ],
+  "properties": {
+    "location": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^xcpng://",
+      "description": "xcpng://host[:port] of the pool master"
+    },
+    "username": {
+      "type": "string",
+      "minLength": 1,
+      "default": "root",
+      "description": "XAPI user"
+    },
+    "password": {
+      "type": "string",
+      "description": "XAPI password"
+    },
+    "tls_insecure": {
+      "type": "boolean",
+      "default": false,
+      "description": "Skip TLS certificate verification (XCP-ng ships a self-signed certificate)"
+    },
+    "sr_uuid": {
+      "type": "string",
+      "minLength": 1,
+      "description": "SR to create restored VDIs on; defaults to the pool's default SR"
+    },
+    "name_suffix": {
+      "type": "string",
+      "default": " (restored)",
+      "description": "Appended to the restored VM's name-label"
+    },
+    "start_on_restore": {
+      "type": "boolean",
+      "default": false,
+      "description": "Start the VM once restored"
+    },
+    "keep_mac": {
+      "type": "boolean",
+      "default": false,
+      "description": "Give the restored VIFs their original MAC addresses (disaster recovery). Leave false when the original VM still runs on the same network"
+    },
+    "keep_tags": {
+      "type": "boolean",
+      "default": false,
+      "description": "Give the restored VM the original's tags (disaster recovery). Leave false when the original still exists, or tag-based backups will also select the copy"
+    },
+    "keep_secureboot_update": {
+      "type": "boolean",
+      "default": false,
+      "description": "Let the target pool replace the restored VM's Secure Boot keys at next boot when it marks old (2011) certificates for update. Off by default: the update changes what the guest measures, so a key sealed to its vTPM (BitLocker) may stop unsealing. The cost of leaving it off: the VM keeps the 2011 Microsoft certificates, which expire in 2026, and may later refuse boot components signed only with the 2023 ones. Turn it on for VMs without a sealed key, or once the BitLocker recovery key is at hand"
+    }
+  }
+}

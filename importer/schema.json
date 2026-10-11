@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Plakar XCP-ng Importer Connector Config",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "location",
+    "password"
+  ],
+  "properties": {
+    "location": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^xcpng://",
+      "description": "xcpng://host[:port] of the pool master"
+    },
+    "username": {
+      "type": "string",
+      "minLength": 1,
+      "default": "root",
+      "description": "XAPI user"
+    },
+    "password": {
+      "type": "string",
+      "description": "XAPI password"
+    },
+    "tls_insecure": {
+      "type": "boolean",
+      "default": false,
+      "description": "Skip TLS certificate verification (XCP-ng ships a self-signed certificate)"
+    },
+    "vm_uuid": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Back up one VM by UUID"
+    },
+    "vm_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Back up every VM with this name-label"
+    },
+    "vm_tag": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Back up every VM carrying this tag"
+    },
+    "stale_snapshot_age": {
+      "type": "string",
+      "default": "24h",
+      "description": "Destroy this connector's snapshots of the VM older than this (left by an interrupted backup) before taking a new one. Go duration; 0 disables. Must exceed the longest backup of one VM"
+    },
+    "vtpm": {
+      "type": "string",
+      "enum": [
+        "include",
+        "skip"
+      ],
+      "description": "What to do with a VM's vTPM. include stores its state, which holds the guest's TPM secrets such as disk unlock keys, in the backup; skip backs up without it, and the restored VM has no vTPM. No default: backing up a VM with a vTPM fails until this is set"
+    }
+  },
+  "oneOf": [
+    {
+      "required": [
+        "vm_uuid"
+      ]
+    },
+    {
+      "required": [
+        "vm_name"
+      ]
+    },
+    {
+      "required": [
+        "vm_tag"
+      ]
+    }
+  ]
+}
