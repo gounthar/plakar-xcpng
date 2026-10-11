@@ -131,7 +131,7 @@ func (c *Client) rpc(ctx context.Context, method string, params []any) (json.Raw
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", method, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s: HTTP %s", method, resp.Status)
@@ -192,7 +192,7 @@ func (c *Client) ExportRawVDI(ctx context.Context, vdiRef string) (io.ReadCloser
 		return nil, fmt.Errorf("export_raw_vdi: %w", redactURL(err))
 	}
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("export_raw_vdi: HTTP %s", resp.Status)
 	}
 	return resp.Body, nil
@@ -210,7 +210,7 @@ func (c *Client) ImportRawVDI(ctx context.Context, vdiRef string, size int64, r 
 	if err != nil {
 		return fmt.Errorf("import_raw_vdi: %w", redactURL(err))
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 
 	if resp.StatusCode != http.StatusOK {
