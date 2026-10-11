@@ -1,0 +1,17 @@
+# Secrets
+.env
+*.credentials.json
+*.token
+*.pw
+*.pass
+.pass
+
+# Local-only material: internal notes, run results, test images, plakar stores
+local/
+*.raw
+*.xva
+*.vma
+store-*/
+
+# Build output
+/bin/
