@@ -291,6 +291,7 @@ func (p *Exporter) checkSecureBoot(ctx context.Context, vmRef, name string) erro
 		if err := p.client.Call(ctx, nil, "VM.update_secureboot_certificates_on_boot", vmRef, false); err != nil {
 			return fmt.Errorf("VM %q: clearing the Secure Boot key update: %w", name, err)
 		}
+		warnf("VM %q keeps its 2011 Secure Boot certificates, which expire in 2026: the target pool's update to the 2023 ones was cleared to protect a key sealed to its vTPM; set keep_secureboot_update=true to keep the update", name)
 	}
 
 	var readiness string

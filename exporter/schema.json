@@ -57,7 +57,7 @@
     "keep_secureboot_update": {
       "type": "boolean",
       "default": false,
-      "description": "Let the target pool replace the restored VM's Secure Boot keys at next boot when it marks old (2011) certificates for update. Off by default: the update changes what the guest measures, so a key sealed to its vTPM (BitLocker) may stop unsealing"
+      "description": "Let the target pool replace the restored VM's Secure Boot keys at next boot when it marks old (2011) certificates for update. Off by default: the update changes what the guest measures, so a key sealed to its vTPM (BitLocker) may stop unsealing. The cost of leaving it off: the VM keeps the 2011 Microsoft certificates, which expire in 2026, and may later refuse boot components signed only with the 2023 ones. Turn it on for VMs without a sealed key, or once the BitLocker recovery key is at hand"
     }
   }
 }

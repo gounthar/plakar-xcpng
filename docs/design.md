@@ -169,7 +169,11 @@ VM, and before starting it, the exporter:
   `auto_update_vm_secureboot_certificates`, NVRAM with only the 2011 Microsoft
   certificates). The update replaces PK, KEK and db, which changes what the guest
   measures, so a key sealed to the restored vTPM may no longer unseal.
-  `keep_secureboot_update=true` keeps the update;
+  `keep_secureboot_update=true` keeps the update. Leaving it off has a cost: the VM keeps
+  the 2011 Microsoft certificates, which expire in 2026, and may later refuse boot
+  components signed only with the 2023 ones. So the exporter warns when it clears the
+  update, and the option is the one to set for VMs without a sealed key, or once the
+  BitLocker recovery key is at hand;
 - asks `VM.get_secureboot_readiness`, and:
   - `ready`: nothing to do;
   - `ready_no_dbx`, `setup_mode` (Secure Boot requested but not enforced) or
