@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"os"
 	"path"
 	"strings"
 
@@ -31,6 +33,7 @@ type options struct {
 	startOnRestore bool
 	keepMAC        bool
 	keepTags       bool
+	keepSBUpdate   bool
 }
 
 type Exporter struct {
@@ -61,6 +64,9 @@ func NewExporter(ctx context.Context, opts *connectors.Options, name string, con
 	}
 	if o.keepTags, err = xapi.ParseBool(config["keep_tags"]); err != nil {
 		return nil, fmt.Errorf("keep_tags: %w", err)
+	}
+	if o.keepSBUpdate, err = xapi.ParseBool(config["keep_secureboot_update"]); err != nil {
+		return nil, fmt.Errorf("keep_secureboot_update: %w", err)
 	}
 
 	client, err := xapi.Dial(ctx, cfg)
@@ -252,10 +258,115 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 		return err
 	}
 
+	// Only the target pool can change a restored VM's Secure Boot state, so only a gap in
+	// the pool holds the VM back; it is restored halted and the pool can be fixed first.
+	if err := p.checkSecureBoot(ctx, vmRef, name); err != nil {
+		return err
+	}
+
 	if p.opts.startOnRestore {
 		return p.client.Call(ctx, nil, "VM.start", vmRef, false, false)
 	}
 	return nil
+}
+
+// checkSecureBoot runs after the VM is created and before it can start. The VM's NVRAM
+// is restored as it was, so an initialised VM keeps its own Secure Boot keys whatever
+// the target pool holds; only a VM that never booted takes its keys from the pool.
+func (p *Exporter) checkSecureBoot(ctx context.Context, vmRef, name string) error {
+	// XAPI marks a VM whose NVRAM holds only the 2011 Microsoft certificates for a key
+	// update on boot when the target pool asks for it. That update replaces PK, KEK and
+	// db, which changes what the guest measures into PCR7, so a key sealed in a restored
+	// vTPM (BitLocker) would no longer unseal. A restore keeps the keys it saved.
+	var certState string
+	err := p.client.Call(ctx, &certState, "VM.get_secureboot_certificates_state", vmRef)
+	switch {
+	case xapi.IsCode(err, "MESSAGE_METHOD_UNKNOWN"):
+		// Older XAPI: no certificate updates, nothing to undo.
+	case err != nil:
+		return err
+	case certState == "update_on_boot" && p.opts.keepSBUpdate:
+		warnf("VM %q: the target pool will replace its Secure Boot keys at next boot (keep_secureboot_update=true); a key sealed to its vTPM may not unseal", name)
+	case certState == "update_on_boot":
+		if err := p.client.Call(ctx, nil, "VM.update_secureboot_certificates_on_boot", vmRef, false); err != nil {
+			return fmt.Errorf("VM %q: clearing the Secure Boot key update: %w", name, err)
+		}
+	}
+
+	var readiness string
+	err = p.client.Call(ctx, &readiness, "VM.get_secureboot_readiness", vmRef)
+	if xapi.IsCode(err, "MESSAGE_METHOD_UNKNOWN") {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	switch readiness {
+	case "ready_no_dbx":
+		warnf("VM %q: Secure Boot keys restored without dbx: revoked bootloaders would still boot", name)
+	case "setup_mode":
+		warnf("VM %q: Secure Boot is on but its NVRAM has no PK, so it is not enforced; the backed-up VM was in the same state", name)
+	case "certs_incomplete":
+		// The guest may still boot (a db entry is enough to verify its bootloader), and
+		// starting the copy reproduces the original: not a reason to hold it back.
+		warnf("VM %q: its NVRAM has a Secure Boot PK but lacks KEK or db; the backed-up VM was in the same state", name)
+	case "first_boot":
+		if reason, err := p.poolSecureBootGap(ctx); err != nil {
+			return err
+		} else if reason != "" {
+			return fmt.Errorf("VM %q restored but not started: it has never booted, so it takes its Secure Boot keys from the pool at first boot, and %s. Install the pool's Secure Boot certificates, then start it", name, reason)
+		}
+	}
+	return nil
+}
+
+// poolSecureBootGap says why the target pool cannot give a first-booting VM its Secure
+// Boot keys, or returns "" if it can.
+func (p *Exporter) poolSecureBootGap(ctx context.Context) (string, error) {
+	var pools []string
+	if err := p.client.Call(ctx, &pools, "pool.get_all"); err != nil {
+		return "", err
+	}
+	if len(pools) != 1 {
+		return "", fmt.Errorf("expected one pool, found %d", len(pools))
+	}
+	var readiness string
+	if err := p.client.Call(ctx, &readiness, "pool.get_guest_secureboot_readiness", pools[0]); err != nil {
+		return "", err
+	}
+	if readiness == "not_ready" {
+		return "the pool has no complete set of Secure Boot certificates (PK, KEK, db)", nil
+	}
+
+	// The readiness above is read on the pool master only; the VM may start on any host.
+	var hosts []string
+	if err := p.client.Call(ctx, &hosts, "host.get_all"); err != nil {
+		return "", err
+	}
+	var first map[string]string
+	for i, h := range hosts {
+		var field string
+		if err := p.client.Call(ctx, &field, "host.get_uefi_certificates", h); err != nil {
+			return "", err
+		}
+		certs, err := xapi.ParseUEFICertificates(field)
+		if err != nil {
+			return "", fmt.Errorf("host Secure Boot certificates: %w", err)
+		}
+		if i == 0 {
+			first = certs
+		} else if !maps.Equal(certs, first) {
+			return "the pool's hosts hold different Secure Boot certificates", nil
+		}
+	}
+	return "", nil
+}
+
+// warnf reports a condition that does not fail the restore. Plugin results carry only
+// success or an error, so warnings go to standard error.
+func warnf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "xcpng: warning: "+format+"\n", args...)
 }
 
 func (p *Exporter) attach(ctx context.Context, vmRef string, vm pendingVM, restored map[string]string) error {

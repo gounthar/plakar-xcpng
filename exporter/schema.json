@@ -53,6 +53,11 @@
       "type": "boolean",
       "default": false,
       "description": "Give the restored VM the original's tags (disaster recovery). Leave false when the original still exists, or tag-based backups will also select the copy"
+    },
+    "keep_secureboot_update": {
+      "type": "boolean",
+      "default": false,
+      "description": "Let the target pool replace the restored VM's Secure Boot keys at next boot when it marks old (2011) certificates for update. Off by default: the update changes what the guest measures, so a key sealed to its vTPM (BitLocker) may stop unsealing"
     }
   }
 }

@@ -78,6 +78,7 @@ Exporter:
 | `start_on_restore` | start the VM once restored, default `false` |
 | `keep_mac` | give the VIFs their original MAC addresses, default `false` |
 | `keep_tags` | give the VM the original's tags, default `false` |
+| `keep_secureboot_update` | let the target pool replace the VM's Secure Boot keys at next boot, default `false` (see below) |
 
 ## Backup (importer)
 
@@ -157,6 +158,32 @@ Tags: by default the restored VM has none. With the original's tags, a backup th
 selects VMs by `vm_tag` would back up the restored copy as well; the first lab restore
 showed exactly that. `keep_tags=true` restores them, for disaster recovery where the copy
 replaces the original and should stay under the same backup selection.
+
+Secure Boot: the VM's `platform` (with `secureboot`) and `NVRAM` are restored as they
+were, never rewritten. Once a VM has booted, its NVRAM holds its own PK, KEK, db and dbx,
+and varstored loads them as they are: the target pool's certificates are only used for a
+VM's first boot, or when XAPI marks the VM for a certificate update. So after creating the
+VM, and before starting it, the exporter:
+
+- clears the certificate update XAPI may have marked at `VM.create` (target pool with
+  `auto_update_vm_secureboot_certificates`, NVRAM with only the 2011 Microsoft
+  certificates). The update replaces PK, KEK and db, which changes what the guest
+  measures, so a key sealed to the restored vTPM may no longer unseal.
+  `keep_secureboot_update=true` keeps the update;
+- asks `VM.get_secureboot_readiness`, and:
+  - `ready`: nothing to do;
+  - `ready_no_dbx`, `setup_mode` (Secure Boot requested but not enforced) or
+    `certs_incomplete` (PK, but KEK or db missing): the NVRAM is the backed-up VM's, so
+    the copy is in the same state as the original. It restores and starts, with a warning
+    on standard error. A VM with PK and db but no KEK still booted in the lab;
+  - `first_boot` (the VM never booted, so the pool gives it its keys) on a pool whose
+    master has no complete certificate set, or whose hosts hold different certificates
+    (compared file by file: each host builds its tar in its own order): the VM is restored
+    but not started, and its `vm.json` result is an error saying why. There is no option to start it anyway: installing the pool certificates
+    and starting it is the fix, and nothing is lost by waiting.
+
+A restore never turns Secure Boot off: that would silently weaken a control the owner
+enabled, and it changes PCR7 too.
 
 ## Not in the prototype
 
