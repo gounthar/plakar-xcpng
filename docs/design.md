@@ -236,8 +236,20 @@ A running Debian 12 UEFI guest with a vTPM: with `vtpm` unset the backup was ref
 before any snapshot was taken; with `include` the restored VM got a vTPM whose contents
 were sha256-identical to the stored state; with `skip` the restored VM had none.
 
-Not exercised: a guest writing heavily during the backup (the test guest was idle),
-`start_on_restore`, a guest that actually seals a secret to its vTPM.
+Secure Boot, restored with `start_on_restore=true` on XCP-ng 8.3 (varstored 1.3.4):
+
+| backed-up VM | restore |
+|---|---|
+| never booted, pool with its certificates | started, took the pool's keys |
+| booted | started, no warning |
+| setup mode (no PK) | started, warning |
+| PK and db, no KEK | started, warning, booted to a login prompt |
+| never booted, pool master missing `KEK.auth` | restored halted, error on its `vm.json` |
+| KEK with only the 2011 certificate, pool with `auto_update_vm_secureboot_certificates` | update cleared, warning; with `keep_secureboot_update=true` the update stayed and one boot installed the pool's keys |
+
+Not exercised: a guest writing heavily during the backup (the test guest was idle), a
+guest that actually seals a secret to its vTPM, a pool whose hosts hold different Secure
+Boot certificates (the comparison has a unit test only).
 
 ## Open questions
 
