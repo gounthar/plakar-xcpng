@@ -134,7 +134,31 @@ old MACs, set `keep_mac=true`: VIFs whose MAC was set explicitly get it back, an
   beyond the name fallback above.
 - VM selection by pool, or all VMs.
 
+## Packaging
+
+The manifest declares the class `hypervisor` with no subclass. The `plakar pkg` module
+only accepts `proxmox` and `vmware` as hypervisor subclasses (PlakarKorp/pkg v1.1.7,
+`var.go`), so an `xcpng` subclass needs a change there.
+
+## Measured
+
+plakar 1.1.7, one run per row, one test VM with an 8 GiB disk holding 3.4 GiB of files:
+
+| | stored | wall |
+|---|---|---|
+| first backup | 1.58 GB | 2m04 |
+| second backup, unchanged | 0.74 MB | 1m41 |
+| third backup, 180 MiB of blocks changed | 62.9 MB | 1m37 |
+| restore of the first backup | disk byte-identical (sha256) | 2m06 |
+
+The importer's snapshot and its VDI were gone after the backup. `keep_mac`, VM selection
+by name, `start_on_restore`, UEFI guests and running VMs were not exercised: the test VM
+was halted and BIOS.
+
 ## Open questions
+
+- The restored VM keeps the original's tags, so a backup selected by `vm_tag` picks up
+  the restored copy too. Dropping or rewriting tags on restore is probably wanted.
 
 - Whether restoring the VM from the saved record covers every guest type, in particular
   UEFI guests (NVRAM is in the VM record) and vTPM.
