@@ -48,6 +48,11 @@
       "type": "boolean",
       "default": false,
       "description": "Give the restored VIFs their original MAC addresses (disaster recovery). Leave false when the original VM still runs on the same network"
+    },
+    "keep_tags": {
+      "type": "boolean",
+      "default": false,
+      "description": "Give the restored VM the original's tags (disaster recovery). Leave false when the original still exists, or tag-based backups will also select the copy"
     }
   }
 }

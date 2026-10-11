@@ -30,6 +30,7 @@ type options struct {
 	nameSuffix     string
 	startOnRestore bool
 	keepMAC        bool
+	keepTags       bool
 }
 
 type Exporter struct {
@@ -57,6 +58,9 @@ func NewExporter(ctx context.Context, opts *connectors.Options, name string, con
 
 	if o.keepMAC, err = xapi.ParseBool(config["keep_mac"]); err != nil {
 		return nil, fmt.Errorf("keep_mac: %w", err)
+	}
+	if o.keepTags, err = xapi.ParseBool(config["keep_tags"]); err != nil {
+		return nil, fmt.Errorf("keep_tags: %w", err)
 	}
 
 	client, err := xapi.Dial(ctx, cfg)
@@ -209,7 +213,7 @@ var vmCreateFields = []string{
 	"PV_bootloader", "PV_kernel", "PV_ramdisk", "PV_args", "PV_bootloader_args", "PV_legacy_args",
 	"HVM_boot_policy", "HVM_boot_params", "HVM_shadow_multiplier",
 	"platform", "PCI_bus", "other_config", "recommendations", "xenstore_data",
-	"tags", "start_delay", "shutdown_delay", "order",
+	"start_delay", "shutdown_delay", "order",
 	"hardware_platform_version", "has_vendor_device", "domain_type", "NVRAM",
 }
 
@@ -224,6 +228,12 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 	name, _ := src["name_label"].(string)
 	rec["name_label"] = name + p.opts.nameSuffix
 	rec["is_a_template"] = false
+	// Without keep_tags the copy carries no tags, so a backup selecting VMs by tag
+	// does not pick up the restored copy beside the original.
+	rec["tags"] = []any{}
+	if t, ok := src["tags"]; ok && p.opts.keepTags {
+		rec["tags"] = t
+	}
 	rec["affinity"] = xapi.NullRef
 	if oc, ok := rec["other_config"].(map[string]any); ok && !p.opts.keepMAC {
 		// A copy beside the original must not derive the same MAC addresses.
