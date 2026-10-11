@@ -43,6 +43,11 @@
       "type": "string",
       "minLength": 1,
       "description": "Back up every VM carrying this tag"
+    },
+    "stale_snapshot_age": {
+      "type": "string",
+      "default": "24h",
+      "description": "Destroy this connector's snapshots of the VM older than this (left by an interrupted backup) before taking a new one. Go duration; 0 disables. Must exceed the longest backup of one VM"
     }
   },
   "oneOf": [

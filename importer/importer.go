@@ -32,10 +32,21 @@ type selection struct {
 	tag  string
 }
 
+// snapshotMarker is set in the other_config of every snapshot this connector takes,
+// so that leftovers from an interrupted backup can be found and destroyed, without
+// touching snapshots someone else took.
+const snapshotMarker = "plakar_xcpng_snapshot"
+
+// defaultStaleAge is how old a marked snapshot must be before a later backup treats it
+// as a leftover. It must exceed the longest backup of one VM, or two overlapping
+// backups of the same VM would destroy each other's snapshot.
+const defaultStaleAge = 24 * time.Hour
+
 type Importer struct {
-	cfg    *xapi.Config
-	client *xapi.Client
-	sel    selection
+	cfg      *xapi.Config
+	client   *xapi.Client
+	sel      selection
+	staleAge time.Duration
 
 	// snapshots left to destroy in Close(), when no acknowledgements were available
 	// to tell when their records had been read.
@@ -63,12 +74,20 @@ func NewImporter(ctx context.Context, opts *connectors.Options, name string, con
 		return nil, fmt.Errorf("exactly one of vm_uuid, vm_name or vm_tag must be set")
 	}
 
+	staleAge := defaultStaleAge
+	if v := strings.TrimSpace(config["stale_snapshot_age"]); v != "" {
+		staleAge, err = time.ParseDuration(v)
+		if err != nil || staleAge < 0 {
+			return nil, fmt.Errorf("invalid stale_snapshot_age %q: a Go duration such as 24h, or 0 to disable", v)
+		}
+	}
+
 	client, err := xapi.Dial(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Importer{cfg: cfg, client: client, sel: sel}, nil
+	return &Importer{cfg: cfg, client: client, sel: sel, staleAge: staleAge}, nil
 }
 
 func (p *Importer) Origin() string { return p.cfg.Origin() }
@@ -185,10 +204,18 @@ func (p *Importer) backupVM(ctx context.Context, vmRef string, records chan<- *c
 		return fmt.Errorf("VM %s has no uuid", vmRef)
 	}
 
+	if err := p.destroyStaleSnapshots(ctx, vmRef); err != nil {
+		return fmt.Errorf("VM %s: %w", vmUUID, err)
+	}
+
 	var snapRef string
 	label := fmt.Sprintf("plakar-%s", time.Now().UTC().Format("20060102T150405Z"))
 	if err := p.client.Call(ctx, &snapRef, "VM.snapshot", vmRef, label); err != nil {
 		return fmt.Errorf("snapshot of VM %s: %w", vmUUID, err)
+	}
+	if err := p.client.Call(ctx, nil, "VM.add_to_other_config", snapRef, snapshotMarker, "true"); err != nil {
+		return errors.Join(fmt.Errorf("marking snapshot of VM %s: %w", vmUUID, err),
+			p.destroySnapshot(context.WithoutCancel(ctx), snapRef))
 	}
 
 	var pending []<-chan error
@@ -369,6 +396,40 @@ func (p *Importer) vifs(ctx context.Context, vmRef string) ([]xapi.VIFMeta, erro
 	}
 	slices.SortFunc(out, func(a, b xapi.VIFMeta) int { return strings.Compare(a.Device, b.Device) })
 	return out, nil
+}
+
+type snapshotSummary struct {
+	OtherConfig  map[string]string `json:"other_config"`
+	SnapshotTime string            `json:"snapshot_time"`
+}
+
+// destroyStaleSnapshots destroys this connector's snapshots of a VM that are older
+// than staleAge: what an interrupted backup leaves behind.
+func (p *Importer) destroyStaleSnapshots(ctx context.Context, vmRef string) error {
+	if p.staleAge == 0 {
+		return nil
+	}
+	var snaps []string
+	if err := p.client.Call(ctx, &snaps, "VM.get_snapshots", vmRef); err != nil {
+		return err
+	}
+	var errs []error
+	for _, snap := range snaps {
+		var s snapshotSummary
+		if err := p.client.Call(ctx, &s, "VM.get_record", snap); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if _, ok := s.OtherConfig[snapshotMarker]; !ok {
+			continue
+		}
+		t, err := xapi.ParseTime(s.SnapshotTime)
+		if err != nil || time.Since(t) < p.staleAge {
+			continue
+		}
+		errs = append(errs, p.destroySnapshot(ctx, snap))
+	}
+	return errors.Join(errs...)
 }
 
 // destroySnapshot destroys a VM snapshot and its disk VDIs. VM.destroy alone leaves
