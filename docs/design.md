@@ -99,8 +99,19 @@ For each selected VM:
 4. Wait for Plakar to acknowledge every record of this VM, then destroy the snapshot and
    its VDIs.
 
-Step 4 only runs if the connector is still alive. If plakar is killed or the machine
-running it loses power, the snapshot stays on the host and keeps its storage. So every
+Step 4 only runs if the connector is still alive, and an interrupted plakar does not
+leave it alive: plakar 1.1.7 starts plugins with `exec.CommandContext` and cancels that
+context on SIGINT or SIGTERM, which sends the plugin SIGKILL. So when it takes its first
+snapshot, the importer starts a copy of itself as a watchdog, which ignores SIGINT,
+SIGTERM and SIGHUP. The importer tells it over a pipe which snapshots exist (the
+connector configuration goes over the same pipe, not the command line, because it holds
+the password). If the pipe closes while a snapshot is still listed, the importer died, and
+the watchdog destroys that snapshot and its VDIs, after checking the marker below.
+VDI.destroy is retried for up to two minutes on `VDI_IN_USE`: xapi keeps a VDI attached
+for a moment after an export is cut off.
+
+The watchdog does not help if the machine running plakar loses power or the watchdog
+itself is killed; the snapshot then stays on the host and keeps its storage. So every
 snapshot the connector takes is marked with `plakar_xcpng_snapshot=<its own UUID>` in its
 `other_config` (XAPI copies `other_config` on clone and revert, and a copied marker no
 longer matches the UUID of the object it lands on),
@@ -231,6 +242,12 @@ The restore with `keep_mac` and `keep_tags` brought back the same MAC and tags; 
 default options gave no tags and a new MAC. A backup killed while streaming left its
 marked snapshot behind, and the next backup (with `stale_snapshot_age=1s`) destroyed it
 and its VDIs, while an unmarked snapshot with the same kind of name stayed.
+
+With the watchdog, a backup interrupted with SIGTERM, and another with SIGINT, five
+seconds into streaming an 8 GiB VDI left no snapshot and no snapshot VDI; the watchdog
+was done about two seconds after plakar exited. A first version without the
+`VDI_IN_USE` retry destroyed the snapshot but left its VDI. An uninterrupted backup
+afterwards completed and left neither a snapshot nor a watchdog process.
 
 A running Debian 12 UEFI guest with a vTPM: with `vtpm` unset the backup was refused
 before any snapshot was taken; with `include` the restored VM got a vTPM whose contents

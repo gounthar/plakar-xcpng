@@ -9,5 +9,8 @@ import (
 )
 
 func main() {
+	if importer.IsWatchdog(os.Args) {
+		os.Exit(importer.RunWatchdog(os.Stdin))
+	}
 	sdk.EntrypointImporter(os.Args, importer.NewImporter)
 }
