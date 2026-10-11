@@ -42,11 +42,18 @@ const snapshotMarker = "plakar_xcpng_snapshot"
 // backups of the same VM would destroy each other's snapshot.
 const defaultStaleAge = 24 * time.Hour
 
+// Values of the vtpm option.
+const (
+	vtpmInclude = "include"
+	vtpmSkip    = "skip"
+)
+
 type Importer struct {
 	cfg      *xapi.Config
 	client   *xapi.Client
 	sel      selection
 	staleAge time.Duration
+	vtpm     string
 
 	// snapshots left to destroy in Close(), when no acknowledgements were available
 	// to tell when their records had been read.
@@ -82,12 +89,20 @@ func NewImporter(ctx context.Context, opts *connectors.Options, name string, con
 		}
 	}
 
+	// No default: storing a vTPM puts the guest's disk unlock keys in the backup beside
+	// the disk, and dropping it makes the restored guest unable to unseal them. Neither
+	// is safe to choose for the user, so a VM with a vTPM is refused until one is set.
+	vtpm := strings.TrimSpace(config["vtpm"])
+	if vtpm != "" && vtpm != vtpmInclude && vtpm != vtpmSkip {
+		return nil, fmt.Errorf("invalid vtpm %q: %s or %s", vtpm, vtpmInclude, vtpmSkip)
+	}
+
 	client, err := xapi.Dial(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Importer{cfg: cfg, client: client, sel: sel, staleAge: staleAge}, nil
+	return &Importer{cfg: cfg, client: client, sel: sel, staleAge: staleAge, vtpm: vtpm}, nil
 }
 
 func (p *Importer) Origin() string { return p.cfg.Origin() }
@@ -204,6 +219,18 @@ func (p *Importer) backupVM(ctx context.Context, vmRef string, records chan<- *c
 		return fmt.Errorf("VM %s has no uuid", vmRef)
 	}
 
+	// Checked on the VM, before the snapshot, so a refused backup leaves nothing behind.
+	if p.vtpm == "" {
+		var refs []string
+		if err := p.client.Call(ctx, &refs, "VM.get_VTPMs", vmRef); err != nil {
+			return fmt.Errorf("VM %s: %w", vmUUID, err)
+		}
+		if len(refs) > 0 {
+			return fmt.Errorf("VM %s has a vTPM: set vtpm=%s to store its state (unlock keys) in the backup, or vtpm=%s to back up without it",
+				vmUUID, vtpmInclude, vtpmSkip)
+		}
+	}
+
 	if err := p.destroyStaleSnapshots(ctx, vmRef); err != nil {
 		return fmt.Errorf("VM %s: %w", vmUUID, err)
 	}
@@ -261,7 +288,16 @@ func (p *Importer) backupVM(ctx context.Context, vmRef string, records chan<- *c
 		return err
 	}
 
-	meta := xapi.VMMeta{Version: xapi.MetaVersion, VM: vm, VIFs: vifs}
+	// Read from the snapshot, so the TPM state matches the disks.
+	var vtpms []xapi.VTPMMeta
+	if p.vtpm == vtpmInclude {
+		vtpms, err = p.vtpms(ctx, snapRef)
+		if err != nil {
+			return fmt.Errorf("VM %s: %w", vmUUID, err)
+		}
+	}
+
+	meta := xapi.VMMeta{Version: xapi.MetaVersion, VM: vm, VIFs: vifs, VTPMs: vtpms}
 	for _, d := range disks {
 		meta.Disks = append(meta.Disks, d.meta)
 	}
@@ -373,6 +409,26 @@ func (p *Importer) snapshotDisks(ctx context.Context, snapRef string) ([]snapsho
 		})
 	}
 	slices.SortFunc(out, func(a, b snapshotDisk) int { return strings.Compare(a.meta.File, b.meta.File) })
+	return out, nil
+}
+
+func (p *Importer) vtpms(ctx context.Context, vmRef string) ([]xapi.VTPMMeta, error) {
+	var refs []string
+	if err := p.client.Call(ctx, &refs, "VM.get_VTPMs", vmRef); err != nil {
+		return nil, err
+	}
+
+	var out []xapi.VTPMMeta
+	for _, ref := range refs {
+		var t xapi.VTPMMeta
+		if err := p.client.Call(ctx, &t.IsUnique, "VTPM.get_is_unique", ref); err != nil {
+			return nil, fmt.Errorf("vTPM: %w", err)
+		}
+		if err := p.client.Call(ctx, &t.Contents, "VTPM.get_contents", ref); err != nil {
+			return nil, fmt.Errorf("vTPM contents: %w", err)
+		}
+		out = append(out, t)
+	}
 	return out, nil
 }
 

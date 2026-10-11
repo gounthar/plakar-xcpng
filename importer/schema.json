@@ -48,6 +48,14 @@
       "type": "string",
       "default": "24h",
       "description": "Destroy this connector's snapshots of the VM older than this (left by an interrupted backup) before taking a new one. Go duration; 0 disables. Must exceed the longest backup of one VM"
+    },
+    "vtpm": {
+      "type": "string",
+      "enum": [
+        "include",
+        "skip"
+      ],
+      "description": "What to do with a VM's vTPM. include stores its state, which holds the guest's TPM secrets such as disk unlock keys, in the backup; skip backs up without it, and the restored VM has no vTPM. No default: backing up a VM with a vTPM fails until this is set"
     }
   },
   "oneOf": [

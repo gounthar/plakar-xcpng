@@ -61,7 +61,13 @@ Importer selection, exactly one of:
 | `vm_uuid` | one VM by UUID |
 | `vm_name` | every VM whose name-label is exactly this |
 | `vm_tag` | every VM carrying this tag |
+
+Importer options:
+
+| Key | Meaning |
+|---|---|
 | `stale_snapshot_age` | destroy leftover snapshots older than this, default `24h`, `0` disables |
+| `vtpm` | `include` or `skip` the VM's vTPM state. No default: a VM with a vTPM is refused until it is set (see below) |
 
 Exporter:
 
@@ -102,6 +108,15 @@ and before step 1 the importer destroys the VM's marked snapshots older than
 whatever their name. The age threshold exists because two backups of the same VM can
 overlap; it has to be longer than the longest backup of one VM.
 
+vTPM: the TPM state holds whatever the guest sealed to it, typically the key that unlocks
+its encrypted disk. Storing it puts that key in the same backup as the disk, protected only
+by the store's encryption; leaving it out means a restored guest cannot unseal anything and
+falls back to its recovery key, if it has one. Neither is a safe default, so the importer
+checks the VM for a vTPM before taking the snapshot and fails with a message naming the
+option until `vtpm` is set. With `include`, `vm.json` gets a `vtpms` list
+(`is_unique` and the base64 `contents` from `VTPM.get_contents`), read from the snapshot so
+it matches the disks. With `skip`, the list is empty.
+
 Step 4 relies on `FLAG_NEEDACK`: with it, Plakar sends one result per record once that
 record has been fully read and chunked, and the gRPC layer forwards those results to the
 plugin (`go-kloset-sdk` `importer.go`, `integration-grpc` `importer/importer.go`).
@@ -125,6 +140,8 @@ Nothing guarantees that `vm.json` arrives before the disks, so:
    saved `userdevice`, `bootable` and `mode`, and recreate the VIFs on networks with the
    same UUID, falling back to the same name. A network that cannot be found is skipped
    with an error on that record.
+   A `vtpms` entry is recreated with `VTPM.create` and `VTPM.set_contents`; a failure
+   fails that VM's restore rather than leaving a VM that boots without its TPM.
 4. Send the results: per `.raw` as it completes, per `vm.json` at the end.
 
 The restored VM is always a new VM. The prototype never overwrites an existing one.
@@ -184,13 +201,18 @@ default options gave no tags and a new MAC. A backup killed while streaming left
 marked snapshot behind, and the next backup (with `stale_snapshot_age=1s`) destroyed it
 and its VDIs, while an unmarked snapshot with the same kind of name stayed.
 
+A running Debian 12 UEFI guest with a vTPM: with `vtpm` unset the backup was refused
+before any snapshot was taken; with `include` the restored VM got a vTPM whose contents
+were sha256-identical to the stored state; with `skip` the restored VM had none.
+
 Not exercised: a guest writing heavily during the backup (the test guest was idle),
-`start_on_restore`, UEFI and vTPM guests.
+`start_on_restore`, a guest that actually seals a secret to its vTPM.
 
 ## Open questions
 
 
-- Whether restoring the VM from the saved record covers every guest type, in particular
-  UEFI guests (NVRAM is in the VM record) and vTPM.
+- Whether restoring the VM from the saved record covers every guest type. UEFI guests
+  (NVRAM is in the VM record) and vTPM state round-trip on XCP-ng 8.3; older targets
+  were not tried.
 - Whether `format=vhd` with its sparse map would read less of a thin-provisioned VDI
   without hurting deduplication. Raw is what was measured.

@@ -53,6 +53,8 @@ type VMMeta struct {
 	VM    map[string]any `json:"vm"`
 	Disks []DiskMeta     `json:"disks"`
 	VIFs  []VIFMeta      `json:"vifs"`
+	// VTPMs is absent from backups made before vTPM support: those restore without one.
+	VTPMs []VTPMMeta `json:"vtpms,omitempty"`
 }
 
 type DiskMeta struct {
@@ -74,6 +76,13 @@ type VIFMeta struct {
 	MTU              int64  `json:"mtu"`
 	NetworkUUID      string `json:"network_uuid"`
 	NetworkName      string `json:"network_name"`
+}
+
+// VTPMMeta is a virtual TPM. Contents is the TPM state as VTPM.get_contents returns
+// it; it holds the guest's TPM secrets, protected only by the store's encryption.
+type VTPMMeta struct {
+	IsUnique bool   `json:"is_unique"`
+	Contents string `json:"contents"`
 }
 
 // DiskFilename is the record name of a disk: stable across backups, since it uses

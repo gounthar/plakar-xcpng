@@ -314,6 +314,17 @@ func (p *Exporter) attach(ctx context.Context, vmRef string, vm pendingVM, resto
 			return err
 		}
 	}
+
+	// A guest that sealed secrets to its TPM cannot unseal them without this state.
+	for _, t := range vm.meta.VTPMs {
+		var ref string
+		if err := p.client.Call(ctx, &ref, "VTPM.create", vmRef, t.IsUnique); err != nil {
+			return fmt.Errorf("vTPM of %s: %w", vm.dir, err)
+		}
+		if err := p.client.Call(ctx, nil, "VTPM.set_contents", ref, t.Contents); err != nil {
+			return fmt.Errorf("vTPM contents of %s: %w", vm.dir, err)
+		}
+	}
 	return nil
 }
 
