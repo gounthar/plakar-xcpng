@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"slices"
 	"strings"
@@ -57,7 +58,11 @@ type Importer struct {
 
 	// snapshots left to destroy in Close(), when no acknowledgements were available
 	// to tell when their records had been read.
-	deferred []string
+	deferred []takenSnapshot
+
+	// config is kept for the snapshot watchdog, started at the first snapshot.
+	config   map[string]string
+	watchdog *watchdog
 }
 
 func NewImporter(ctx context.Context, opts *connectors.Options, name string, config map[string]string) (importer.Importer, error) {
@@ -102,7 +107,7 @@ func NewImporter(ctx context.Context, opts *connectors.Options, name string, con
 		return nil, err
 	}
 
-	return &Importer{cfg: cfg, client: client, sel: sel, staleAge: staleAge, vtpm: vtpm}, nil
+	return &Importer{cfg: cfg, client: client, sel: sel, staleAge: staleAge, vtpm: vtpm, config: config}, nil
 }
 
 func (p *Importer) Origin() string { return p.cfg.Origin() }
@@ -119,9 +124,14 @@ func (p *Importer) Ping(ctx context.Context) error {
 func (p *Importer) Close(ctx context.Context) error {
 	var errs []error
 	for _, snap := range p.deferred {
-		errs = append(errs, p.destroySnapshot(ctx, snap))
+		errs = append(errs, p.destroySnapshot(ctx, snap.ref))
+		p.unwatch(snap.uuid)
 	}
 	p.deferred = nil
+	if p.watchdog != nil {
+		errs = append(errs, p.watchdog.close())
+		p.watchdog = nil
+	}
 	errs = append(errs, p.client.Close(ctx))
 	return errors.Join(errs...)
 }
@@ -204,6 +214,33 @@ func (p *Importer) resolveVMs(ctx context.Context) ([]string, error) {
 	}
 }
 
+type takenSnapshot struct {
+	ref  string
+	uuid string
+}
+
+// watch hands a snapshot to the watchdog, starting it on first use. Without a watchdog
+// the backup still runs: only the stale-snapshot sweep then covers a killed plugin.
+func (p *Importer) watch(snapUUID string) {
+	if p.watchdog == nil {
+		wd, err := startWatchdog(p.config)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "xcpng: warning: %s: a killed backup will leave snapshot %s behind\n", err, snapUUID)
+			return
+		}
+		p.watchdog = wd
+	}
+	if err := p.watchdog.add(snapUUID); err != nil {
+		fmt.Fprintf(os.Stderr, "xcpng: warning: %s: a killed backup will leave snapshot %s behind\n", err, snapUUID)
+	}
+}
+
+func (p *Importer) unwatch(snapUUID string) {
+	if p.watchdog != nil {
+		_ = p.watchdog.remove(snapUUID)
+	}
+}
+
 type snapshotDisk struct {
 	meta    xapi.DiskMeta
 	snapVDI string
@@ -252,11 +289,13 @@ func (p *Importer) backupVM(ctx context.Context, vmRef string, records chan<- *c
 			p.destroySnapshot(context.WithoutCancel(ctx), snapRef))
 	}
 
+	p.watch(snapUUID)
+
 	var pending []<-chan error
 	defer func() {
 		if acks == nil {
 			// Nothing tells us when the streams are done: keep the snapshot until Close().
-			p.deferred = append(p.deferred, snapRef)
+			p.deferred = append(p.deferred, takenSnapshot{ref: snapRef, uuid: snapUUID})
 			return
 		}
 		for _, ch := range pending {
@@ -268,6 +307,9 @@ func (p *Importer) backupVM(ctx context.Context, vmRef string, records chan<- *c
 		if cerr := p.destroySnapshot(cleanupCtx, snapRef); cerr != nil {
 			err = errors.Join(err, cerr)
 		}
+		// Even on failure: the stale-snapshot sweep remains, and a watchdog retrying
+		// the same failing call would only delay the exit.
+		p.unwatch(snapUUID)
 	}()
 
 	var snapTimeStr string
@@ -527,9 +569,30 @@ func (p *Importer) destroySnapshot(ctx context.Context, snapRef string) error {
 	}
 	var errs []error
 	for _, vdi := range vdis {
-		if err := p.client.Call(ctx, nil, "VDI.destroy", vdi); err != nil {
+		if err := p.destroyVDI(ctx, vdi); err != nil {
 			errs = append(errs, fmt.Errorf("cleanup of snapshot VDI %s: %w", vdi, err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// vdiInUseRetry is how long VDI.destroy is retried while the VDI is in use. When an
+// export is cut off, xapi keeps the VDI attached for a while after the connection drops.
+const vdiInUseRetry = 2 * time.Minute
+
+func (p *Importer) destroyVDI(ctx context.Context, vdi string) error {
+	deadline := time.Now().Add(vdiInUseRetry)
+	delay := time.Second
+	for {
+		err := p.client.Call(ctx, nil, "VDI.destroy", vdi)
+		if err == nil || !xapi.IsCode(err, "VDI_IN_USE") || time.Now().After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-time.After(delay):
+		}
+		delay = min(2*delay, 10*time.Second)
+	}
 }
