@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Plakar XCP-ng Importer Connector Config",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "location",
+    "password"
+  ],
+  "properties": {
+    "location": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^xcpng://",
+      "description": "xcpng://host[:port] of the pool master"
+    },
+    "username": {
+      "type": "string",
+      "minLength": 1,
+      "default": "root",
+      "description": "XAPI user"
+    },
+    "password": {
+      "type": "string",
+      "description": "XAPI password"
+    },
+    "tls_insecure": {
+      "type": "boolean",
+      "default": false,
+      "description": "Skip TLS certificate verification (XCP-ng ships a self-signed certificate)"
+    },
+    "vm_uuid": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Back up one VM by UUID"
+    },
+    "vm_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Back up every VM with this name-label"
+    },
+    "vm_tag": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Back up every VM carrying this tag"
+    }
+  },
+  "oneOf": [
+    {
+      "required": [
+        "vm_uuid"
+      ]
+    },
+    {
+      "required": [
+        "vm_name"
+      ]
+    },
+    {
+      "required": [
+        "vm_tag"
+      ]
+    }
+  ]
+}

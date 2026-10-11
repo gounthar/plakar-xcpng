@@ -15,3 +15,8 @@ store-*/
 
 # Build output
 /bin/
+
+# Build output
+xcpngImporter
+xcpngExporter
+*.ptar
