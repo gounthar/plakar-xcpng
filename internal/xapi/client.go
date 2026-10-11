@@ -189,7 +189,7 @@ func (c *Client) ExportRawVDI(ctx context.Context, vdiRef string) (io.ReadCloser
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("export_raw_vdi: %w", err)
+		return nil, fmt.Errorf("export_raw_vdi: %w", redactURL(err))
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
@@ -208,7 +208,7 @@ func (c *Client) ImportRawVDI(ctx context.Context, vdiRef string, size int64, r 
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("import_raw_vdi: %w", err)
+		return fmt.Errorf("import_raw_vdi: %w", redactURL(err))
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
@@ -217,4 +217,14 @@ func (c *Client) ImportRawVDI(ctx context.Context, vdiRef string, size int64, r 
 		return fmt.Errorf("import_raw_vdi: HTTP %s", resp.Status)
 	}
 	return nil
+}
+
+// redactURL drops the request URL from an HTTP client error: the export and import
+// URLs carry the session id in their query string.
+func redactURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("%s: %w", ue.Op, ue.Err)
+	}
+	return err
 }
