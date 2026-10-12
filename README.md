@@ -30,6 +30,11 @@ plakar destination add pool xcpng://pool-master password=... tls_insecure=true
 plakar at /path/to/store restore -to @pool <snapshot>
 ```
 
+Pushing a `v*` tag (a semantic version, such as `v0.2.0` or `v0.2.0-rc.1`) runs the CI
+checks, then builds `linux/amd64`, `linux/arm64` and `linux/riscv64` packages with plakar
+1.1.7 and attaches them to a GitHub release with a `SHA256SUMS` file. A tag with a `-`
+suffix makes a pre-release. The packages are not signed yet.
+
 ## Background
 
 What the measurements found, with plakar 1.1.7 on an 8 GiB disk holding 3.4 GiB of files:
