@@ -102,30 +102,42 @@ jobs:
       # Commit the v1.1.7 tag points to; the build stops if the tag moves.
       PLAKAR_COMMIT: c8d93c212ab21d1bdc4a85f0120cedfa246504a1
     steps:
+      # The binary depends only on the plakar commit, so a cache hit skips the
+      # checkout, Go setup and build. The key holds the commit, which is what
+      # the tag check below would otherwise establish.
+      - uses: actions/cache@v6
+        id: cache
+        with:
+          path: ${{ runner.temp }}/plakar-bin
+          key: plakar-${{ env.PLAKAR_COMMIT }}-linux-riscv64-cgo0
       - uses: actions/checkout@v7
+        if: steps.cache.outputs.cache-hit != 'true'
         with:
           repository: PlakarKorp/plakar
           ref: v${{ env.PLAKAR_VERSION }}
           path: plakar-src
           persist-credentials: false
       - name: Check the tag
+        if: steps.cache.outputs.cache-hit != 'true'
         working-directory: plakar-src
         run: test "$(git rev-parse HEAD)" = "$PLAKAR_COMMIT"
       - uses: actions/setup-go@v7
+        if: steps.cache.outputs.cache-hit != 'true'
         with:
           go-version-file: plakar-src/go.mod
           cache: false
       - name: Build
+        if: steps.cache.outputs.cache-hit != 'true'
         working-directory: plakar-src
         env:
           CGO_ENABLED: '0'
           GOOS: linux
           GOARCH: riscv64
-        run: go build -trimpath -o "$RUNNER_TEMP/plakar" .
+        run: go build -trimpath -o "$RUNNER_TEMP/plakar-bin/plakar" .
       - uses: actions/upload-artifact@v7
         with:
           name: plakar-linux-riscv64
-          path: ${{ runner.temp }}/plakar
+          path: ${{ runner.temp }}/plakar-bin/plakar
           if-no-files-found: error
           retention-days: 1
 
