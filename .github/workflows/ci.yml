@@ -60,7 +60,7 @@ jobs:
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
       - name: YAML
-        run: pipx run yamllint==1.38.0 --strict .github/workflows manifest.yaml .yamllint.yml
+        run: pipx run yamllint==1.38.0 --strict .github/workflows .github/dependabot.yml manifest.yaml .yamllint.yml
       - name: JSON schemas
         run: |
           for f in importer/schema.json exporter/schema.json; do

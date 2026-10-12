@@ -216,6 +216,11 @@ The manifest declares the class `hypervisor` with no subclass. The `plakar pkg` 
 only accepts `proxmox` and `vmware` as hypervisor subclasses (PlakarKorp/pkg v1.1.7,
 `var.go`), so an `xcpng` subclass needs a change there.
 
+`go-kloset-sdk` and `integration-grpc` carry the plugin's gRPC contract with plakar.
+Dependabot groups them into one pull request; before merging one, run a backup and a
+restore with the plakar release the measurements below were taken with, since a clean
+build does not show the two sides still agree.
+
 ## Measured
 
 plakar 1.1.7, one run per row, one test VM with an 8 GiB disk holding 3.4 GiB of files:
