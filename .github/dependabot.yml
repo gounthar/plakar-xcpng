@@ -17,6 +17,9 @@ updates:
         patterns:
           - github.com/PlakarKorp/*
       go-minor-patch:
+        # Without this, PR #14 put the PlakarKorp modules in this group.
+        exclude-patterns:
+          - github.com/PlakarKorp/*
         update-types:
           - minor
           - patch
