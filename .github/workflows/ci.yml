@@ -5,6 +5,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow runs the same checks before it packages a tag.
+  workflow_call:
 
 permissions:
   contents: read
