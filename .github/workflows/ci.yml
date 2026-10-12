@@ -88,12 +88,50 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: go build ./...
 
-  # Install the package with the matching upstream plakar on a native runner
+  # Install the package with plakar 1.1.7 for the same architecture on a native runner
   # and make plakar start the importer. There is no pool to reach from here, so
   # the importer's login error is the expected result: it proves plakar ran the
   # plugin binary and spoke to it over gRPC.
+  # PlakarKorp publishes no riscv64 release asset, so build plakar from the
+  # release tag for the riscv64 smoke job.
+  plakar-riscv64:
+    name: Build plakar linux/riscv64
+    runs-on: ubuntu-24.04
+    env:
+      PLAKAR_VERSION: 1.1.7
+      # Commit the v1.1.7 tag points to; the build stops if the tag moves.
+      PLAKAR_COMMIT: c8d93c212ab21d1bdc4a85f0120cedfa246504a1
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: PlakarKorp/plakar
+          ref: v${{ env.PLAKAR_VERSION }}
+          path: plakar-src
+          persist-credentials: false
+      - name: Check the tag
+        working-directory: plakar-src
+        run: test "$(git rev-parse HEAD)" = "$PLAKAR_COMMIT"
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: plakar-src/go.mod
+          cache: false
+      - name: Build
+        working-directory: plakar-src
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: riscv64
+        run: go build -trimpath -o "$RUNNER_TEMP/plakar" .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plakar-linux-riscv64
+          path: ${{ runner.temp }}/plakar
+          if-no-files-found: error
+          retention-days: 1
+
   package-smoke:
     name: Package smoke linux/${{ matrix.goarch }}
+    needs: plakar-riscv64
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -107,6 +145,9 @@ jobs:
             runner: ubuntu-24.04-arm
             # sha256 of plakar_1.1.7_linux_arm64.tar.gz, from the release's checksums file.
             plakar_sha256: b2886861abcce04ad8098317f3b5259905285287438aeff22d544a8cff18fc66
+          # RISE runner, one fresh board per job. plakar comes from plakar-riscv64.
+          - goarch: riscv64
+            runner: ubuntu-24.04-riscv
     env:
       PLAKAR_VERSION: 1.1.7
     steps:
@@ -118,6 +159,7 @@ jobs:
       - name: Vet and race tests
         run: make test
       - name: Install plakar
+        if: matrix.goarch != 'riscv64'
         env:
           GH_TOKEN: ${{ github.token }}
           PLAKAR_SHA256: ${{ matrix.plakar_sha256 }}
@@ -127,6 +169,16 @@ jobs:
           echo "${PLAKAR_SHA256}  ${RUNNER_TEMP}/${tarball}" | sha256sum -c -
           mkdir "$RUNNER_TEMP/plakar"
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/plakar" plakar
+          echo "$RUNNER_TEMP/plakar" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v8
+        if: matrix.goarch == 'riscv64'
+        with:
+          name: plakar-linux-riscv64
+          path: ${{ runner.temp }}/plakar
+      - name: Install plakar built from source
+        if: matrix.goarch == 'riscv64'
+        run: |
+          chmod +x "$RUNNER_TEMP/plakar/plakar"
           echo "$RUNNER_TEMP/plakar" >> "$GITHUB_PATH"
       - name: Package
         env:
