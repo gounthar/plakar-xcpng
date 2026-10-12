@@ -145,6 +145,10 @@ jobs:
     name: Package smoke linux/${{ matrix.goarch }}
     needs: plakar-riscv64
     runs-on: ${{ matrix.runner }}
+    # riscv64 took 15 min with an empty Go cache. A board that hangs fails the
+    # job (and a release, which runs this workflow first) instead of holding it
+    # for the 6 h default. Time spent queued for a runner does not count.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
