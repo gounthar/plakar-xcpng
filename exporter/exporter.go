@@ -258,6 +258,13 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 		return err
 	}
 
+	// XAPI copies never carry a unique vTPM's state; a restore does, by design.
+	for _, t := range vm.meta.VTPMs {
+		if t.IsUnique {
+			warnf("VM %q: its vTPM is unique and the copy has the original's TPM state, so the same TPM identity and sealed secrets; do not run both", name)
+		}
+	}
+
 	// Only the target pool can change a restored VM's Secure Boot state, so only a gap in
 	// the pool holds the VM back; it is restored halted and the pool can be fixed first.
 	if err := p.checkSecureBoot(ctx, vmRef, name); err != nil {
