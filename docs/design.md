@@ -127,7 +127,9 @@ falls back to its recovery key, if it has one. Neither is a safe default, so the
 checks the VM for a vTPM before taking the snapshot and fails with a message naming the
 option until `vtpm` is set. With `include`, `vm.json` gets a `vtpms` list
 (`is_unique` and the base64 `contents` from `VTPM.get_contents`), read from the snapshot so
-it matches the disks. With `skip`, the list is empty.
+it matches the disks. The exception is a vTPM with `is_unique=true`: XAPI never copies the
+state of a unique vTPM, so the snapshot's copy is empty, and its state is read from the VM
+itself, a moment after the disks were snapshotted. With `skip`, the list is empty.
 
 Step 4 relies on `FLAG_NEEDACK`: with it, Plakar sends one result per record once that
 record has been fully read and chunked, and the gRPC layer forwards those results to the
@@ -153,7 +155,10 @@ Nothing guarantees that `vm.json` arrives before the disks, so:
    same UUID, falling back to the same name. A network that cannot be found is skipped
    with an error on that record.
    A `vtpms` entry is recreated with `VTPM.create` and `VTPM.set_contents`; a failure
-   fails that VM's restore rather than leaving a VM that boots without its TPM.
+   fails that VM's restore rather than leaving a VM that boots without its TPM. A unique
+   vTPM is recreated unique with the original's state, which gives the copy the same TPM
+   identity and sealed secrets: that is what a disaster-recovery restore needs, and what
+   `is_unique` exists to prevent while the original runs, so the restore warns.
 4. Send the results: per `.raw` as it completes, per `vm.json` at the end.
 
 The restored VM is always a new VM. The prototype never overwrites an existing one.
@@ -258,6 +263,17 @@ A running Debian 12 UEFI guest with a vTPM: with `vtpm` unset the backup was ref
 before any snapshot was taken; with `include` the restored VM got a vTPM whose contents
 were sha256-identical to the stored state; with `skip` the restored VM had none.
 
+The same with Secure Boot on and a guest that seals a random secret at first boot, both in
+a TPM NV index and with `systemd-creds --with-key=tpm2 --tpm2-pcrs=7`, then reports at each
+boot whether it unseals:
+
+| vTPM | restored guest |
+|---|---|
+| `is_unique=false`, `include` | both unseal, PCR7 identical to the original's |
+| `is_unique=false`, `skip` | no TPM device |
+| `is_unique=true`, `include`, state read from the snapshot (before #19) | backed up with an empty state; restored without a warning; neither unseals |
+| `is_unique=true`, `include`, state read from the VM | both unseal, PCR7 identical; the restore warns that the copy shares the original's TPM state |
+
 Secure Boot, restored with `start_on_restore=true` on XCP-ng 8.3 (varstored 1.3.4):
 
 | backed-up VM | restore |
@@ -270,8 +286,8 @@ Secure Boot, restored with `start_on_restore=true` on XCP-ng 8.3 (varstored 1.3.
 | KEK with only the 2011 certificate, pool with `auto_update_vm_secureboot_certificates` | update cleared, warning; with `keep_secureboot_update=true` the update stayed and one boot installed the pool's keys |
 
 Not exercised: a guest writing heavily during the backup (the test guest was idle), a
-guest that actually seals a secret to its vTPM, a pool whose hosts hold different Secure
-Boot certificates (the comparison has a unit test only).
+pool whose hosts hold different Secure Boot certificates (the comparison has a unit test
+only), and `keep_secureboot_update=true` with a guest that sealed a secret.
 
 ## Open questions
 

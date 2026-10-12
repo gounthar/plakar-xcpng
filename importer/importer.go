@@ -330,10 +330,11 @@ func (p *Importer) backupVM(ctx context.Context, vmRef string, records chan<- *c
 		return err
 	}
 
-	// Read from the snapshot, so the TPM state matches the disks.
+	// Read from the snapshot, so the TPM state matches the disks (see vtpms for the
+	// exception).
 	var vtpms []xapi.VTPMMeta
 	if p.vtpm == vtpmInclude {
-		vtpms, err = p.vtpms(ctx, snapRef)
+		vtpms, err = p.vtpms(ctx, snapRef, vmRef)
 		if err != nil {
 			return fmt.Errorf("VM %s: %w", vmUUID, err)
 		}
@@ -454,9 +455,12 @@ func (p *Importer) snapshotDisks(ctx context.Context, snapRef string) ([]snapsho
 	return out, nil
 }
 
-func (p *Importer) vtpms(ctx context.Context, vmRef string) ([]xapi.VTPMMeta, error) {
+// vtpms reads the snapshot's vTPMs. XAPI never copies the state of a unique vTPM: the
+// snapshot of one has an empty state, so a unique vTPM's state is read from the VM
+// itself, a moment after the disks were snapshotted.
+func (p *Importer) vtpms(ctx context.Context, snapRef, vmRef string) ([]xapi.VTPMMeta, error) {
 	var refs []string
-	if err := p.client.Call(ctx, &refs, "VM.get_VTPMs", vmRef); err != nil {
+	if err := p.client.Call(ctx, &refs, "VM.get_VTPMs", snapRef); err != nil {
 		return nil, err
 	}
 
@@ -466,7 +470,19 @@ func (p *Importer) vtpms(ctx context.Context, vmRef string) ([]xapi.VTPMMeta, er
 		if err := p.client.Call(ctx, &t.IsUnique, "VTPM.get_is_unique", ref); err != nil {
 			return nil, fmt.Errorf("vTPM: %w", err)
 		}
-		if err := p.client.Call(ctx, &t.Contents, "VTPM.get_contents", ref); err != nil {
+		src := ref
+		if t.IsUnique {
+			var vmRefs []string
+			if err := p.client.Call(ctx, &vmRefs, "VM.get_VTPMs", vmRef); err != nil {
+				return nil, err
+			}
+			// VTPM.create refuses a second vTPM, so there is nothing to match.
+			if len(vmRefs) != 1 {
+				return nil, fmt.Errorf("unique vTPM: the VM has %d vTPMs, expected 1", len(vmRefs))
+			}
+			src = vmRefs[0]
+		}
+		if err := p.client.Call(ctx, &t.Contents, "VTPM.get_contents", src); err != nil {
 			return nil, fmt.Errorf("vTPM contents: %w", err)
 		}
 		out = append(out, t)
