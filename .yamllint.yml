@@ -1,0 +1,12 @@
+---
+extends: default
+
+rules:
+  # manifest.yaml follows the layout of the other Plakar integrations.
+  document-start: disable
+  indentation:
+    indent-sequences: whatever
+  line-length:
+    max: 120
+  truthy:
+    check-keys: false
