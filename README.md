@@ -55,3 +55,7 @@ So the planned connector exports each VDI as raw, plus a metadata record for the
   - `xva-normalize.py` and `vma-normalize.py` rewrite an XVA or a VMA archive with stable
     identifiers.
   - `run-vma.sh` is one measured run of VMA against raw.
+
+## Licence
+
+ISC, the same as the Plakar SDK and integrations it builds on. See `LICENSE`.
