@@ -87,3 +87,68 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
         run: go build ./...
+
+  # Install the package with the matching upstream plakar on a native runner
+  # and make plakar start the importer. There is no pool to reach from here, so
+  # the importer's login error is the expected result: it proves plakar ran the
+  # plugin binary and spoke to it over gRPC.
+  package-smoke:
+    name: Package smoke linux/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            runner: ubuntu-24.04
+            # sha256 of plakar_1.1.7_linux_amd64.tar.gz, from the release's checksums file.
+            plakar_sha256: 95a6a36546064df033a8f9bae0837c625de3fbcb209b9795d7f2034a733e85fa
+          - goarch: arm64
+            runner: ubuntu-24.04-arm
+            # sha256 of plakar_1.1.7_linux_arm64.tar.gz, from the release's checksums file.
+            plakar_sha256: b2886861abcce04ad8098317f3b5259905285287438aeff22d544a8cff18fc66
+    env:
+      PLAKAR_VERSION: 1.1.7
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Vet and race tests
+        run: make test
+      - name: Install plakar
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLAKAR_SHA256: ${{ matrix.plakar_sha256 }}
+        run: |
+          tarball="plakar_${PLAKAR_VERSION}_linux_${{ matrix.goarch }}.tar.gz"
+          gh release download "v${PLAKAR_VERSION}" -R PlakarKorp/plakar -p "$tarball" -D "$RUNNER_TEMP"
+          echo "${PLAKAR_SHA256}  ${RUNNER_TEMP}/${tarball}" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/plakar"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/plakar" plakar
+          echo "$RUNNER_TEMP/plakar" >> "$GITHUB_PATH"
+      - name: Package
+        env:
+          CGO_ENABLED: '0'
+        run: make package VERSION=v0.0.0-ci
+      - name: Install package
+        run: |
+          plakar pkg add -allow-unsigned ./xcpng_v0.0.0-ci_linux_${{ matrix.goarch }}.ptar
+          plakar pkg list | grep -Fx 'xcpng@v0.0.0-ci'
+      - name: Start the importer
+        env:
+          PLAKAR_PASSPHRASE: ci-throwaway
+        run: |
+          store="$RUNNER_TEMP/store"
+          plakar source add smoke xcpng://127.0.0.1:1 password=x \
+            vm_uuid=00000000-0000-0000-0000-000000000000
+          plakar at "$store" create
+          # plakar can exit 0 on some failures, so check the message, not only the status.
+          if out=$(plakar at "$store" backup -no-progress @smoke 2>&1); then
+            echo "$out"
+            echo "backup unexpectedly succeeded"
+            exit 1
+          fi
+          echo "$out"
+          grep -q 'session.login_with_password' <<<"$out"
