@@ -167,7 +167,10 @@ jobs:
     env:
       PLAKAR_VERSION: 1.1.7
     steps:
+      # This job runs downloaded binaries; keep the token out of .git/config.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
