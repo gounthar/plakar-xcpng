@@ -147,6 +147,12 @@ Nothing guarantees that `vm.json` arrives before the disks, so:
 
 1. Each `.raw` record is restored as soon as it arrives: create a VDI of the record's size
    on the target SR, then stream the record into `/import_raw_vdi?vdi=...&format=raw`.
+   Where a new VDI reads as zeroes, the stream uses xapi's chunked form of that call
+   (`&chunked=true`: an offset and length before each piece of data) and leaves out
+   every 2 MiB block that is all zeroes, so a thin SR allocates only the blocks that
+   hold data. The SRs where a new VDI is not zeroed follow xapi's own rule
+   (`must_write_zeroes_into_new_vdi`: LVM without `use_vhd`, EqualLogic thick,
+   StorageLink); there every byte is written, zeroes included.
    The original VDI UUID from the pathname is kept in a map to the new VDI.
 2. Each `vm.json` is kept in memory.
 3. Once all records are in, for each `vm.json`: create the VM from the saved record
