@@ -101,6 +101,10 @@ func (p *Exporter) Export(ctx context.Context, records <-chan *connectors.Record
 	defer close(results)
 
 	srRef, srErr := p.targetSR(ctx)
+	sparse := false
+	if srErr == nil {
+		sparse, srErr = p.srZeroesNewVDIs(ctx, srRef)
+	}
 
 	restored := make(map[string]string) // dir + "/" + original VDI UUID -> new VDI ref
 	var vms []pendingVM
@@ -138,7 +142,7 @@ func (p *Exporter) Export(ctx context.Context, records <-chan *connectors.Record
 			continue
 		}
 
-		ref, err := p.restoreDisk(ctx, srRef, base, record)
+		ref, err := p.restoreDisk(ctx, srRef, sparse, base, record)
 		if err == nil {
 			restored[dir+"/"+vdiUUID] = ref
 		}
@@ -180,7 +184,22 @@ func (p *Exporter) targetSR(ctx context.Context) (string, error) {
 	return ref, nil
 }
 
-func (p *Exporter) restoreDisk(ctx context.Context, srRef, name string, record *connectors.Record) (string, error) {
+// srZeroesNewVDIs tells whether disks can be restored sparsely on the SR: only where
+// a new VDI already reads as zeroes can the zero blocks be left out.
+func (p *Exporter) srZeroesNewVDIs(ctx context.Context, srRef string) (bool, error) {
+	var sr struct {
+		Type     string            `json:"type"`
+		SMConfig map[string]string `json:"sm_config"`
+	}
+	if err := p.client.Call(ctx, &sr, "SR.get_record", srRef); err != nil {
+		return false, err
+	}
+	return xapi.SRZeroesNewVDIs(sr.Type, sr.SMConfig), nil
+}
+
+// restoreDisk creates a VDI and writes the record into it. With sparse set, only the
+// blocks holding data are sent, so a thin SR allocates only those.
+func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, name string, record *connectors.Record) (string, error) {
 	size := record.FileInfo.Lsize
 	var ref string
 	err := p.client.Call(ctx, &ref, "VDI.create", map[string]any{
@@ -200,7 +219,12 @@ func (p *Exporter) restoreDisk(ctx context.Context, srRef, name string, record *
 		return "", err
 	}
 
-	if err := p.client.ImportRawVDI(ctx, ref, size, record.Reader); err != nil {
+	if sparse {
+		_, err = p.client.ImportSparseVDI(ctx, ref, size, record.Reader)
+	} else {
+		err = p.client.ImportRawVDI(ctx, ref, size, record.Reader)
+	}
+	if err != nil {
 		if derr := p.client.Call(context.WithoutCancel(ctx), nil, "VDI.destroy", ref); derr != nil {
 			err = errors.Join(err, derr)
 		}

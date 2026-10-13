@@ -3,9 +3,11 @@
 package xapi
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +51,7 @@ func IsCode(err error, code string) bool {
 type Client struct {
 	base    string // https://host[:port]
 	http    *http.Client
+	tls     *tls.Config
 	session string
 	nextID  atomic.Uint64
 }
@@ -61,6 +64,7 @@ func Dial(ctx context.Context, cfg *Config) (*Client, error) {
 	c := &Client{
 		base: "https://" + cfg.Host,
 		http: &http.Client{Transport: transport},
+		tls:  transport.TLSClientConfig,
 	}
 
 	err := c.login(ctx, cfg)
@@ -217,6 +221,141 @@ func (c *Client) ImportRawVDI(ctx context.Context, vdiRef string, size int64, r 
 		return fmt.Errorf("import_raw_vdi: HTTP %s", resp.Status)
 	}
 	return nil
+}
+
+// sparseBlock is the unit in which ImportSparseVDI looks for zeroes: one VHD block.
+const sparseBlock = 2 << 20
+
+// ImportSparseVDI writes size bytes from r into an existing VDI and sends only the
+// 2 MiB blocks that hold a non-zero byte, so a file-based SR allocates no block for
+// the rest. The VDI must read as zeroes before the import (see SRZeroesNewVDIs). It
+// returns the number of bytes sent.
+//
+// It uses xapi's chunked import (import_raw_vdi with chunked set): each chunk is a
+// little-endian uint64 byte offset and uint32 length followed by the data, and an
+// all-zero header ends the stream. xapi rejects a Transfer-Encoding and the body
+// length is not known in advance, which net/http cannot send, so the request is
+// written on the TLS connection directly.
+func (c *Client) ImportSparseVDI(ctx context.Context, vdiRef string, size int64, r io.Reader) (int64, error) {
+	u, err := url.Parse(c.handlerURL("/import_raw_vdi", vdiRef) + "&chunked=true")
+	if err != nil {
+		return 0, err
+	}
+	addr := u.Host
+	if u.Port() == "" {
+		addr = net.JoinHostPort(u.Hostname(), "443")
+	}
+
+	dialer := &tls.Dialer{Config: c.tls}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return 0, fmt.Errorf("import_raw_vdi: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+
+	w := bufio.NewWriterSize(conn, 64<<10)
+	sent, werr := writeChunked(w, u, size, r)
+	if se := (*sourceError)(nil); errors.As(werr, &se) {
+		// Closing the connection mid-stream makes xapi fail the import.
+		return sent, se.err
+	}
+	if werr == nil {
+		werr = w.Flush()
+	}
+
+	// xapi answers before it reads the body, so a refused request is reported
+	// here even when writing the body failed.
+	br := bufio.NewReader(conn)
+	resp, rerr := http.ReadResponse(br, nil)
+	if rerr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return sent, ctxErr
+		}
+		if werr != nil {
+			return sent, fmt.Errorf("import_raw_vdi: %w", werr)
+		}
+		return sent, fmt.Errorf("import_raw_vdi: reading response: %w", rerr)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return sent, fmt.Errorf("import_raw_vdi: HTTP %s", resp.Status)
+	}
+	if werr != nil {
+		return sent, fmt.Errorf("import_raw_vdi: %w", werr)
+	}
+	// xapi closes the connection once the data is written to the VDI.
+	if _, err := io.Copy(io.Discard, io.LimitReader(br, 64<<10)); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return sent, ctxErr
+		}
+		return sent, fmt.Errorf("import_raw_vdi: %w", err)
+	}
+	return sent, nil
+}
+
+// sourceError is a failure to read the disk being restored, as opposed to a failure
+// to send it.
+type sourceError struct{ err error }
+
+func (e *sourceError) Error() string { return e.err.Error() }
+
+func writeChunked(w *bufio.Writer, u *url.URL, size int64, r io.Reader) (int64, error) {
+	if _, err := fmt.Fprintf(w, "PUT %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", u.RequestURI(), u.Host); err != nil {
+		return 0, err
+	}
+	if err := w.Flush(); err != nil {
+		return 0, err
+	}
+
+	buf := make([]byte, sparseBlock)
+	zero := make([]byte, sparseBlock)
+	var hdr [12]byte
+	var sent int64
+	for off := int64(0); off < size; {
+		n := int(min(int64(sparseBlock), size-off))
+		if _, err := io.ReadFull(r, buf[:n]); err != nil {
+			return sent, &sourceError{fmt.Errorf("reading disk at offset %d: %w", off, err)}
+		}
+		if !bytes.Equal(buf[:n], zero[:n]) {
+			binary.LittleEndian.PutUint64(hdr[:8], uint64(off))
+			binary.LittleEndian.PutUint32(hdr[8:], uint32(n))
+			if _, err := w.Write(hdr[:]); err != nil {
+				return sent, err
+			}
+			if _, err := w.Write(buf[:n]); err != nil {
+				return sent, err
+			}
+			sent += int64(n)
+		}
+		off += int64(n)
+	}
+	clear(hdr[:])
+	_, err := w.Write(hdr[:])
+	return sent, err
+}
+
+// SRZeroesNewVDIs reports whether a new VDI on an SR of this type reads as zeroes,
+// which ImportSparseVDI relies on. It mirrors xapi's must_write_zeroes_into_new_vdi
+// (ocaml/xapi/sm_fs_ops.ml): LVM SRs not upgraded to VHD, EqualLogic in thick mode
+// and StorageLink do not zero new disks. The raw-VDI request that rule also checks
+// is a statefile setting this connector never sets.
+func SRZeroesNewVDIs(srType string, smConfig map[string]string) bool {
+	switch strings.ToLower(srType) {
+	case "lvm", "lvmoiscsi", "lvmohba":
+		return smConfig["use_vhd"] == "true"
+	case "equal":
+		for k, v := range smConfig {
+			if strings.EqualFold(k, "allocation") && strings.EqualFold(v, "thick") {
+				return false
+			}
+		}
+		return true
+	case "cslg":
+		return false
+	}
+	return true
 }
 
 // redactURL drops the request URL from an HTTP client error: the export and import
