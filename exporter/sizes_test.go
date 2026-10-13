@@ -82,7 +82,8 @@ func TestCheckDiskSizesRefusesShortDisk(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "disk-1") {
 		t.Fatalf("short disk not refused: %v", err)
 	}
-	if len(f.destroyed) != 1 || f.destroyed[0] != "OpaqueRef:b" {
-		t.Fatalf("destroyed %v, want only OpaqueRef:b", f.destroyed)
+	// Both disks go: the VM is not created, so the complete one would have no owner.
+	if len(f.destroyed) != 2 || f.destroyed[0] != "OpaqueRef:a" || f.destroyed[1] != "OpaqueRef:b" {
+		t.Fatalf("destroyed %v, want OpaqueRef:a and OpaqueRef:b", f.destroyed)
 	}
 }

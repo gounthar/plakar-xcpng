@@ -412,18 +412,27 @@ func warnf(format string, args ...any) {
 
 // checkDiskSizes refuses a VM whose restored disks do not have the virtual size its
 // vm.json records: a backup made before #27 was fixed can hold a disk whose export
-// was cut short. The short VDIs are destroyed so the failed restore leaves nothing.
+// was cut short. Every disk restored for that VM is then destroyed, so the failed
+// restore leaves nothing behind.
 func (p *Exporter) checkDiskSizes(ctx context.Context, vm pendingVM, restored map[string]restoredDisk) error {
 	var errs []error
 	for _, d := range vm.meta.Disks {
 		disk, ok := restored[vm.dir+"/"+d.VDIUUID]
-		if !ok || disk.size == d.VirtualSize {
+		if ok && disk.size != d.VirtualSize {
+			errs = append(errs, fmt.Errorf("disk %s of %s holds %d bytes, vm.json says %d: the backup is incomplete",
+				d.File, vm.dir, disk.size, d.VirtualSize))
+		}
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	for _, d := range vm.meta.Disks {
+		disk, ok := restored[vm.dir+"/"+d.VDIUUID]
+		if !ok {
 			continue
 		}
-		errs = append(errs, fmt.Errorf("disk %s of %s holds %d bytes, vm.json says %d: the backup is incomplete",
-			d.File, vm.dir, disk.size, d.VirtualSize))
 		if err := p.client.Call(ctx, nil, "VDI.destroy", disk.ref); err != nil {
-			errs = append(errs, fmt.Errorf("destroying the incomplete VDI %s: %w", disk.ref, err))
+			errs = append(errs, fmt.Errorf("destroying restored VDI %s: %w", disk.ref, err))
 		}
 	}
 	return errors.Join(errs...)
