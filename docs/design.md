@@ -214,9 +214,10 @@ enabled, and it changes PCR7 too.
 - Restoring onto an existing VM, or into a different pool with different network names
   beyond the name fallback above.
 - VM selection by pool, or all VMs.
-- Thin restores. A restored VDI is written with `format=raw`, so every block is
-  allocated, zeros included: a disk with 725 non-zero 2 MiB blocks out of 1536 came back
-  with all 1536 allocated (#21).
+- Thin restores. A restored VDI is written with `format=raw`, and on the one thin SR
+  tried (ext, XCP-ng 8.3) every block was allocated, zeros included: a disk with 725
+  non-zero 2 MiB blocks out of 1536 came back with all 1536 allocated (#21). Other SR
+  types were not tried; LVM SRs are thick anyway.
 
 ## Packaging
 
