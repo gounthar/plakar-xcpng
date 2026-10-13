@@ -2,9 +2,23 @@
 name: CI
 
 on:
+  # Nothing in these jobs reads documentation, the lab scripts or the licence, so a
+  # change touching only those skips CI. A change that also touches code runs it all.
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "lab/**"
+      - LICENSE
+      - ".github/ISSUE_TEMPLATE/**"
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "lab/**"
+      - LICENSE
+      - ".github/ISSUE_TEMPLATE/**"
   # The release workflow runs the same checks before it packages a tag.
   workflow_call:
 
