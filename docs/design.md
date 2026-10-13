@@ -214,6 +214,10 @@ enabled, and it changes PCR7 too.
 - Restoring onto an existing VM, or into a different pool with different network names
   beyond the name fallback above.
 - VM selection by pool, or all VMs.
+- Thin restores. A restored VDI is written with `format=raw`, and on the one thin SR
+  tried (ext, XCP-ng 8.3) every block was allocated, zeros included: a disk with 725
+  non-zero 2 MiB blocks out of 1536 came back with all 1536 allocated (#21). Other SR
+  types were not tried; LVM SRs are thick anyway.
 
 ## Packaging
 
@@ -285,9 +289,29 @@ Secure Boot, restored with `start_on_restore=true` on XCP-ng 8.3 (varstored 1.3.
 | never booted, pool master missing `KEK.auth` | restored halted, error on its `vm.json` |
 | KEK with only the 2011 certificate, pool with `auto_update_vm_secureboot_certificates` | update cleared, warning; with `keep_secureboot_update=true` the update stayed and one boot installed the pool's keys |
 
-Not exercised: a guest writing heavily during the backup (the test guest was idle), a
+The last row again with the sealing guest, its KEK reduced to the 2011 certificate before
+first boot: with the default restore, the KEK stayed as backed up, PCR7 matched the
+original's, and both secrets unsealed. With `keep_secureboot_update=true`, the first boot
+installed the pool's KEK, PCR7 changed, the NV index secret still unsealed and the
+PCR7-bound one did not ("policy digest does not match"). That is the cost the warning
+describes; a BitLocker volume bound to PCR7 may ask for its recovery key in the same way
+(Windows was not tested).
+
+The vTPM's dictionary-attack lockout counter is part of the state that is backed up. A
+backup of a running VM captures a vTPM that has not been shut down in order, so the
+restored copy counts one failed authorization at its first start: its counter read 1
+where the original's read 0. A backup of a VM halted with a clean shutdown gave a copy
+whose counter read 0. The test guest's vTPM locks at 3 (`TPM2_PT_MAX_AUTH_FAIL`) and
+forgets one failure every 1000 s, so a copy restored from a running VM whose counter
+already stands at 2 is locked at first boot, and a sealed secret will not unseal until
+the lockout expires. In the run above the default-restore copy hit exactly that: one
+forced reboot of the original before the backup, the copy's first start, then one forced
+reboot of the copy. It unsealed both secrets once the lockout ended. For a VM
+whose guest unseals at boot, back it up halted, or expect one try to be spent.
+
+Not exercised: a guest writing heavily during the backup (the test guest was idle), and a
 pool whose hosts hold different Secure Boot certificates (the comparison has a unit test
-only), and `keep_secureboot_update=true` with a guest that sealed a secret.
+only).
 
 ## Open questions
 
