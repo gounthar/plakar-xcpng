@@ -89,6 +89,12 @@ func (p *Exporter) Close(ctx context.Context) error {
 	return p.client.Close(ctx)
 }
 
+// restoredDisk is a VDI written from a disk record, and the size that record held.
+type restoredDisk struct {
+	ref  string
+	size int64
+}
+
 type pendingVM struct {
 	record *connectors.Record
 	dir    string
@@ -106,7 +112,7 @@ func (p *Exporter) Export(ctx context.Context, records <-chan *connectors.Record
 		sparse, srErr = p.srZeroesNewVDIs(ctx, srRef)
 	}
 
-	restored := make(map[string]string) // dir + "/" + original VDI UUID -> new VDI ref
+	restored := make(map[string]restoredDisk) // dir + "/" + original VDI UUID -> new VDI
 	var vms []pendingVM
 
 	for record := range records {
@@ -144,7 +150,7 @@ func (p *Exporter) Export(ctx context.Context, records <-chan *connectors.Record
 
 		ref, err := p.restoreDisk(ctx, srRef, sparse, base, record)
 		if err == nil {
-			restored[dir+"/"+vdiUUID] = ref
+			restored[dir+"/"+vdiUUID] = restoredDisk{ref: ref, size: record.FileInfo.Lsize}
 		}
 		results <- record.Error(err) // Error(nil) closes the reader and reports success
 	}
@@ -247,7 +253,10 @@ var vmCreateFields = []string{
 	"hardware_platform_version", "has_vendor_device", "domain_type", "NVRAM",
 }
 
-func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[string]string) error {
+func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[string]restoredDisk) error {
+	if err := p.checkDiskSizes(ctx, vm, restored); err != nil {
+		return err
+	}
 	src := vm.meta.VM
 	rec := make(map[string]any, len(vmCreateFields)+8)
 	for _, k := range vmCreateFields {
@@ -401,9 +410,29 @@ func warnf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "xcpng: warning: "+format+"\n", args...)
 }
 
-func (p *Exporter) attach(ctx context.Context, vmRef string, vm pendingVM, restored map[string]string) error {
+// checkDiskSizes refuses a VM whose restored disks do not have the virtual size its
+// vm.json records: a backup made before #27 was fixed can hold a disk whose export
+// was cut short. The short VDIs are destroyed so the failed restore leaves nothing.
+func (p *Exporter) checkDiskSizes(ctx context.Context, vm pendingVM, restored map[string]restoredDisk) error {
+	var errs []error
 	for _, d := range vm.meta.Disks {
-		vdiRef, ok := restored[vm.dir+"/"+d.VDIUUID]
+		disk, ok := restored[vm.dir+"/"+d.VDIUUID]
+		if !ok || disk.size == d.VirtualSize {
+			continue
+		}
+		errs = append(errs, fmt.Errorf("disk %s of %s holds %d bytes, vm.json says %d: the backup is incomplete",
+			d.File, vm.dir, disk.size, d.VirtualSize))
+		if err := p.client.Call(ctx, nil, "VDI.destroy", disk.ref); err != nil {
+			errs = append(errs, fmt.Errorf("destroying the incomplete VDI %s: %w", disk.ref, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (p *Exporter) attach(ctx context.Context, vmRef string, vm pendingVM, restored map[string]restoredDisk) error {
+	for _, d := range vm.meta.Disks {
+		disk, ok := restored[vm.dir+"/"+d.VDIUUID]
+		vdiRef := disk.ref
 		if !ok {
 			return fmt.Errorf("disk %s of %s was not restored", d.File, vm.dir)
 		}

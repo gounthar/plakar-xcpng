@@ -371,7 +371,7 @@ func (p *Importer) backupVM(ctx context.Context, vmRef string, records chan<- *c
 	}
 
 	for _, d := range disks {
-		snapVDI := d.snapVDI
+		snapVDI, size := d.snapVDI, d.meta.VirtualSize
 		rec := connectors.NewRecord(
 			path.Join(dir, d.meta.File), "",
 			objects.FileInfo{
@@ -382,7 +382,7 @@ func (p *Importer) backupVM(ctx context.Context, vmRef string, records chan<- *c
 				Ldev:     1,
 			},
 			nil,
-			func() (io.ReadCloser, error) { return p.client.ExportRawVDI(ctx, snapVDI) },
+			func() (io.ReadCloser, error) { return p.client.ExportRawVDI(ctx, snapVDI, size) },
 		)
 		if err := emit(rec); err != nil {
 			return err
