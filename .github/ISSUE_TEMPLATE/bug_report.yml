@@ -1,0 +1,80 @@
+name: Bug report
+description: A backup or restore that failed or produced the wrong result
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The details below usually decide the answer, so please fill in all of them.
+        For a security problem, use private vulnerability reporting instead (see the issue chooser).
+  - type: input
+    id: plakar-version
+    attributes:
+      label: plakar version
+      description: Output of `plakar version`
+      placeholder: plakar/v1.1.7
+    validations:
+      required: true
+  - type: input
+    id: connector-version
+    attributes:
+      label: Connector package version
+      description: The `xcpng` line from `plakar pkg list`, or the `.ptar` file name you installed
+      placeholder: xcpng_v0.1.0_linux_amd64.ptar
+    validations:
+      required: true
+  - type: input
+    id: xcpng-version
+    attributes:
+      label: XCP-ng version
+      placeholder: "8.3"
+    validations:
+      required: true
+  - type: dropdown
+    id: sr-type
+    attributes:
+      label: SR type
+      description: >-
+        Of the SR holding the source disks for a backup, or the target SR for a restore.
+        Restores are thin only on SRs that zero new VDIs.
+      options:
+        - ext (local)
+        - LVM (local)
+        - NFS
+        - SMB
+        - iSCSI / LVMoISCSI
+        - HBA / LVMoHBA
+        - Other (say which below)
+    validations:
+      required: true
+  - type: dropdown
+    id: operation
+    attributes:
+      label: Backup or restore
+      options:
+        - Backup
+        - Restore
+        - Both
+    validations:
+      required: true
+  - type: checkboxes
+    id: firmware
+    attributes:
+      label: VM firmware
+      description: Tick what applies to the VM
+      options:
+        - label: UEFI (leave unticked for BIOS)
+        - label: Secure Boot enabled
+        - label: vTPM attached
+  - type: textarea
+    id: command
+    attributes:
+      label: Command run and its output
+      description: The full plakar command and everything it printed. Remove hostnames and credentials.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: What you expected, and anything else

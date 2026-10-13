@@ -1,0 +1,21 @@
+name: Feature request
+description: Something the connector should do that it does not
+labels: [enhancement]
+body:
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: What you are trying to do, and where the connector gets in the way
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How you would like it to work, if you have an idea
+  - type: input
+    id: xcpng-version
+    attributes:
+      label: XCP-ng version
+      placeholder: "8.3"
