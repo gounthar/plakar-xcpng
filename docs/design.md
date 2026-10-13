@@ -147,6 +147,12 @@ Nothing guarantees that `vm.json` arrives before the disks, so:
 
 1. Each `.raw` record is restored as soon as it arrives: create a VDI of the record's size
    on the target SR, then stream the record into `/import_raw_vdi?vdi=...&format=raw`.
+   Where a new VDI reads as zeroes, the stream uses xapi's chunked form of that call
+   (`&chunked=true`: an offset and length before each piece of data) and leaves out
+   every 2 MiB block that is all zeroes, so a thin SR allocates only the blocks that
+   hold data. The SRs where a new VDI is not zeroed follow xapi's own rule
+   (`must_write_zeroes_into_new_vdi`: LVM without `use_vhd`, EqualLogic thick,
+   StorageLink); there every byte is written, zeroes included.
    The original VDI UUID from the pathname is kept in a map to the new VDI.
 2. Each `vm.json` is kept in memory.
 3. Once all records are in, for each `vm.json`: create the VM from the saved record
@@ -214,10 +220,6 @@ enabled, and it changes PCR7 too.
 - Restoring onto an existing VM, or into a different pool with different network names
   beyond the name fallback above.
 - VM selection by pool, or all VMs.
-- Thin restores. A restored VDI is written with `format=raw`, and on the one thin SR
-  tried (ext, XCP-ng 8.3) every block was allocated, zeros included: a disk with 725
-  non-zero 2 MiB blocks out of 1536 came back with all 1536 allocated (#21). Other SR
-  types were not tried; LVM SRs are thick anyway.
 
 ## Packaging
 
@@ -312,6 +314,19 @@ whose guest unseals at boot, back it up halted, or expect one try to be spent.
 Not exercised: a guest writing heavily during the backup (the test guest was idle), and a
 pool whose hosts hold different Secure Boot certificates (the comparison has a unit test
 only).
+
+Disk allocation on restore, ext SR on XCP-ng 8.3, a 3 GiB disk with 725 non-zero 2 MiB
+blocks out of 1536, one run each:
+
+| restore write | VHD blocks allocated | on disk | sent | import |
+|---|---|---|---|---|
+| every byte (`format=raw`, before #21) | 1536 of 1536 | 3.0 GiB | 3 GiB | 41.7 s |
+| zero blocks left out (`chunked=true`) | 725 of 1536 | 1.42 GiB | 1.42 GiB | 20.2 s |
+
+The second row was run both as a single import and end to end (backup of a VM with that
+disk, restore to a new VM); both times the restored disk was sha256-identical to the
+source and `vhd-util check` passed. Not tried on hardware: LVM SRs, which keep the full
+write, and file SRs other than ext.
 
 ## Open questions
 
