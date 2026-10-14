@@ -10,7 +10,7 @@ import (
 func TestHandlerErrorsDoNotLeakSession(t *testing.T) {
 	c := &Client{base: "https://127.0.0.1:1", http: &http.Client{}, session: "OpaqueRef:secret-session"}
 
-	_, err := c.ExportRawVDI(context.Background(), "OpaqueRef:vdi")
+	_, err := c.ExportRawVDI(context.Background(), "OpaqueRef:vdi", 4)
 	if err == nil || strings.Contains(err.Error(), "secret-session") {
 		t.Fatalf("export error leaks the session or is nil: %v", err)
 	}

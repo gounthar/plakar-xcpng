@@ -185,8 +185,12 @@ func (c *Client) handlerURL(handler, vdiRef string) string {
 	return c.base + handler + "?" + q.Encode()
 }
 
-// ExportRawVDI streams the content of a VDI as a raw disk image.
-func (c *Client) ExportRawVDI(ctx context.Context, vdiRef string) (io.ReadCloser, error) {
+// ExportRawVDI streams the content of a VDI as a raw disk image of size bytes, its
+// virtual size. xapi sends no Content-Length and ends the body by closing the
+// connection, so a stream cut off early (toolstack restart, master failover, SR I/O
+// error) reads like a clean end of disk: the reader returns an error unless exactly
+// size bytes arrive.
+func (c *Client) ExportRawVDI(ctx context.Context, vdiRef string, size int64) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.handlerURL("/export_raw_vdi", vdiRef), nil)
 	if err != nil {
 		return nil, err
@@ -199,8 +203,29 @@ func (c *Client) ExportRawVDI(ctx context.Context, vdiRef string) (io.ReadCloser
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("export_raw_vdi: HTTP %s", resp.Status)
 	}
-	return resp.Body, nil
+	return &exactReader{rc: resp.Body, want: size}, nil
 }
+
+// exactReader fails a stream that does not hold exactly want bytes.
+type exactReader struct {
+	rc   io.ReadCloser
+	want int64
+	got  int64
+}
+
+func (r *exactReader) Read(p []byte) (int, error) {
+	n, err := r.rc.Read(p)
+	r.got += int64(n)
+	if r.got > r.want {
+		return n, fmt.Errorf("export_raw_vdi: more than the %d bytes of the disk", r.want)
+	}
+	if errors.Is(err, io.EOF) && r.got < r.want {
+		return n, fmt.Errorf("export_raw_vdi: stream ended after %d of %d bytes: %w", r.got, r.want, io.ErrUnexpectedEOF)
+	}
+	return n, err
+}
+
+func (r *exactReader) Close() error { return r.rc.Close() }
 
 // ImportRawVDI writes size bytes from r into an existing VDI.
 func (c *Client) ImportRawVDI(ctx context.Context, vdiRef string, size int64, r io.Reader) error {
