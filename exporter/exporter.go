@@ -34,6 +34,7 @@ type options struct {
 	keepMAC        bool
 	keepTags       bool
 	keepSBUpdate   bool
+	allowShort     bool
 }
 
 type Exporter struct {
@@ -67,6 +68,9 @@ func NewExporter(ctx context.Context, opts *connectors.Options, name string, con
 	}
 	if o.keepSBUpdate, err = xapi.ParseBool(config["keep_secureboot_update"]); err != nil {
 		return nil, fmt.Errorf("keep_secureboot_update: %w", err)
+	}
+	if o.allowShort, err = xapi.ParseBool(config["allow_incomplete_disks"]); err != nil {
+		return nil, fmt.Errorf("allow_incomplete_disks: %w", err)
 	}
 
 	client, err := xapi.Dial(ctx, cfg)
@@ -160,7 +164,7 @@ func (p *Exporter) Export(ctx context.Context, records <-chan *connectors.Record
 			results <- result(vm.record, err)
 			continue
 		}
-		results <- result(vm.record, p.createVM(ctx, vm, restored))
+		results <- result(vm.record, p.createVM(ctx, vm, restored, sparse))
 	}
 	return nil
 }
@@ -253,8 +257,8 @@ var vmCreateFields = []string{
 	"hardware_platform_version", "has_vendor_device", "domain_type", "NVRAM",
 }
 
-func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[string]restoredDisk) error {
-	if err := p.checkDiskSizes(ctx, vm, restored); err != nil {
+func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[string]restoredDisk, zeroed bool) error {
+	if err := p.checkDiskSizes(ctx, vm, restored, zeroed); err != nil {
 		return err
 	}
 	src := vm.meta.VM
@@ -414,14 +418,33 @@ func warnf(format string, args ...any) {
 // vm.json records: a backup made before #27 was fixed can hold a disk whose export
 // was cut short. Every disk restored for that VM is then destroyed, so the failed
 // restore leaves nothing behind.
-func (p *Exporter) checkDiskSizes(ctx context.Context, vm pendingVM, restored map[string]restoredDisk) error {
+//
+// With allow_incomplete_disks, a short disk is grown to its recorded size instead and
+// the VM is restored with a warning. The grown part must read as zeroes, which only an
+// SR that zeroes new VDIs (zeroed) guarantees, so elsewhere the disk is still refused.
+func (p *Exporter) checkDiskSizes(ctx context.Context, vm pendingVM, restored map[string]restoredDisk, zeroed bool) error {
 	var errs []error
 	for _, d := range vm.meta.Disks {
 		disk, ok := restored[vm.dir+"/"+d.VDIUUID]
-		if ok && disk.size != d.VirtualSize {
+		if !ok || disk.size == d.VirtualSize {
+			continue
+		}
+		if disk.size > d.VirtualSize || !p.opts.allowShort {
 			errs = append(errs, fmt.Errorf("disk %s of %s holds %d bytes, vm.json says %d: the backup is incomplete",
 				d.File, vm.dir, disk.size, d.VirtualSize))
+			continue
 		}
+		if !zeroed {
+			errs = append(errs, fmt.Errorf("disk %s of %s holds %d bytes, vm.json says %d: allow_incomplete_disks needs an SR whose new disks read as zeroes",
+				d.File, vm.dir, disk.size, d.VirtualSize))
+			continue
+		}
+		if err := p.client.Call(ctx, nil, "VDI.resize", disk.ref, d.VirtualSize); err != nil {
+			errs = append(errs, fmt.Errorf("growing disk %s of %s to %d bytes: %w", d.File, vm.dir, d.VirtualSize, err))
+			continue
+		}
+		warnf("disk %s of %s holds only %d of its %d bytes (the backup is incomplete): restored with the last %d bytes read as zeroes (allow_incomplete_disks=true)",
+			d.File, vm.dir, disk.size, d.VirtualSize, d.VirtualSize-disk.size)
 	}
 	if len(errs) == 0 {
 		return nil

@@ -58,6 +58,11 @@
       "type": "boolean",
       "default": false,
       "description": "Let the target pool replace the restored VM's Secure Boot keys at next boot when it marks old (2011) certificates for update. Off by default: the update changes what the guest measures, so a key sealed to its vTPM (BitLocker) may stop unsealing. The cost of leaving it off: the VM keeps the 2011 Microsoft certificates, which expire in 2026, and may later refuse boot components signed only with the 2023 ones. Turn it on for VMs without a sealed key, or once the BitLocker recovery key is at hand"
+    },
+    "allow_incomplete_disks": {
+      "type": "boolean",
+      "default": false,
+      "description": "Restore a VM whose backup holds a disk shorter than the disk was (older versions could store a disk whose export was cut short). The disk is grown to its recorded size and the missing end reads as zeroes, so the guest may find a damaged filesystem. Off by default: such a VM is refused. Needs an SR whose new disks read as zeroes (file-based, or LVM with VHD)"
     }
   }
 }

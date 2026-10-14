@@ -79,6 +79,7 @@ Exporter:
 | `keep_mac` | give the VIFs their original MAC addresses, default `false` |
 | `keep_tags` | give the VM the original's tags, default `false` |
 | `keep_secureboot_update` | let the target pool replace the VM's Secure Boot keys at next boot, default `false` (see below) |
+| `allow_incomplete_disks` | restore a VM whose backup holds a disk shorter than the disk was, default `false` (see below) |
 
 ## Backup (importer)
 
@@ -165,6 +166,14 @@ Nothing guarantees that `vm.json` arrives before the disks, so:
    vTPM is recreated unique with the original's state, which gives the copy the same TPM
    identity and sealed secrets: that is what a disaster-recovery restore needs, and what
    `is_unique` exists to prevent while the original runs, so the restore warns.
+   Before any of this, each restored disk's size is checked against the `virtual_size`
+   in `vm.json`. Older versions could store a disk whose export was cut short; such a VM
+   is refused and its restored VDIs destroyed. With `allow_incomplete_disks=true`, a
+   short disk is grown to its recorded size with `VDI.resize` and the VM is restored with
+   a warning naming the disk: the missing end reads as zeroes, so the guest may find a
+   damaged filesystem. That holds only where a new VDI reads as zeroes, so on the SRs
+   listed in step 1 the disk is still refused. A disk larger than recorded is always
+   refused.
 4. Send the results: per `.raw` as it completes, per `vm.json` at the end.
 
 The restored VM is always a new VM. The prototype never overwrites an existing one.
