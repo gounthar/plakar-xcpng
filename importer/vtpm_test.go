@@ -54,7 +54,7 @@ func (f *fakeXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"result": result})
 }
 
-func dialFake(t *testing.T, f *fakeXAPI) *Importer {
+func dialFake(t *testing.T, f http.Handler) *Importer {
 	t.Helper()
 	srv := httptest.NewTLSServer(f)
 	t.Cleanup(srv.Close)

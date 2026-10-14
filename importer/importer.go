@@ -580,16 +580,23 @@ func (p *Importer) destroySnapshot(ctx context.Context, snapRef string) error {
 		}
 	}
 
-	if err := p.client.Call(ctx, nil, "VM.destroy", snapRef); err != nil {
-		return fmt.Errorf("cleanup of snapshot %s: %w", snapRef, err)
-	}
+	// The VDIs go first. If one cannot be destroyed, the snapshot VM stays, with its
+	// marker, so the next sweep finds it and tries again. Destroying the VM first would
+	// leave an orphan VDI that nothing points back to. VDI.destroy also removes the
+	// VDI's VBDs, so the VM ends up with no disks before it is destroyed.
 	var errs []error
 	for _, vdi := range vdis {
 		if err := p.destroyVDI(ctx, vdi); err != nil {
 			errs = append(errs, fmt.Errorf("cleanup of snapshot VDI %s: %w", vdi, err))
 		}
 	}
-	return errors.Join(errs...)
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	if err := p.client.Call(ctx, nil, "VM.destroy", snapRef); err != nil {
+		return fmt.Errorf("cleanup of snapshot %s: %w", snapRef, err)
+	}
+	return nil
 }
 
 // vdiInUseRetry is how long VDI.destroy is retried while the VDI is in use. When an
