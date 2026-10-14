@@ -5,12 +5,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 type chunk struct {
@@ -30,7 +33,7 @@ type received struct {
 func chunkedServer(t *testing.T, disk []byte, status int, got *received) *httptest.Server {
 	t.Helper()
 	got.done = make(chan struct{})
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(withTasks(t, &fakeTasks{status: "success"}, func(w http.ResponseWriter, r *http.Request) {
 		defer close(got.done)
 		q := r.URL.Query()
 		if r.Method != http.MethodPut || r.URL.Path != "/import_raw_vdi" || q.Get("chunked") != "true" || q.Get("format") != "raw" {
@@ -55,6 +58,73 @@ func chunkedServer(t *testing.T, disk []byte, status int, got *received) *httpte
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// fakeTasks stands in for xapi's task API: one task, which ends with status and,
+// on failure, errorInfo. The import handler must name it in task_id.
+type fakeTasks struct {
+	status    string
+	errorInfo []string
+
+	mu        sync.Mutex
+	created   int
+	destroyed int
+	importArg string
+}
+
+const fakeTaskRef = "OpaqueRef:task"
+
+// withTasks serves the task calls on /jsonrpc and passes the rest to h.
+func withTasks(t *testing.T, ft *fakeTasks, h http.HandlerFunc) http.Handler {
+	t.Helper()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/jsonrpc" {
+			ft.mu.Lock()
+			ft.importArg = r.URL.Query().Get("task_id")
+			ft.mu.Unlock()
+			h(w, r)
+			return
+		}
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decoding rpc: %v", err)
+			return
+		}
+		ft.mu.Lock()
+		defer ft.mu.Unlock()
+		var result any
+		switch req.Method {
+		case "task.create":
+			ft.created++
+			result = fakeTaskRef
+		case "task.get_status":
+			result = ft.status
+		case "task.get_error_info":
+			result = ft.errorInfo
+		case "task.destroy":
+			ft.destroyed++
+			result = ""
+		default:
+			t.Errorf("unexpected rpc %s", req.Method)
+		}
+		if len(req.Params) > 1 && req.Method != "task.create" && req.Params[1] != fakeTaskRef {
+			t.Errorf("%s on %v, want %s", req.Method, req.Params[1], fakeTaskRef)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": result})
+	})
+}
+
+// check reports a task that was not passed to the handler or not destroyed.
+func (ft *fakeTasks) check(t *testing.T) {
+	t.Helper()
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	if ft.importArg != fakeTaskRef {
+		t.Errorf("import task_id = %q, want %q", ft.importArg, fakeTaskRef)
+	}
+	if ft.created != 1 || ft.destroyed != 1 {
+		t.Errorf("tasks created %d, destroyed %d; want 1 and 1", ft.created, ft.destroyed)
+	}
 }
 
 func readChunks(r *bufio.Reader, disk []byte) ([]chunk, error) {
@@ -169,5 +239,107 @@ func TestSRZeroesNewVDIs(t *testing.T) {
 		if got := SRZeroesNewVDIs(tc.typ, tc.sm); got != tc.want {
 			t.Errorf("SRZeroesNewVDIs(%q, %v) = %v, want %v", tc.typ, tc.sm, got, tc.want)
 		}
+	}
+}
+
+// afterAccept is what xapi was seen sending after its 200 when the write failed: it
+// varies from one run to the next on the same restore.
+var afterAccept = map[string]string{
+	"nothing":   "",
+	"400":       "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nCache-Control: no-cache, no-store\r\n\r\n",
+	"400 + 500": "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nHTTP/1.1 500 Internal Error\r\ncontent-length: 12\r\nconnection: close\r\n\r\nVDI_IO_ERROR",
+}
+
+// TestImportSparseVDIWriteFailure covers xapi failing the write after it has
+// answered 200. Only the task says so reliably.
+func TestImportSparseVDIWriteFailure(t *testing.T) {
+	for name, after := range afterAccept {
+		t.Run(name, func(t *testing.T) {
+			disk := make([]byte, 2*sparseBlock)
+			ft := &fakeTasks{status: "failure", errorInfo: []string{"VDI_IO_ERROR", "Device I/O errors"}}
+			srv := httptest.NewTLSServer(withTasks(t, ft, func(w http.ResponseWriter, r *http.Request) {
+				conn, rw, err := http.NewResponseController(w).Hijack()
+				if err != nil {
+					t.Errorf("hijack: %v", err)
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				_, _ = fmt.Fprint(rw, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+				_ = rw.Flush()
+				if _, err := readChunks(rw.Reader, disk); err != nil {
+					t.Errorf("reading chunks: %v", err)
+				}
+				_, _ = fmt.Fprint(rw, after)
+				_ = rw.Flush()
+			}))
+			t.Cleanup(srv.Close)
+			c := testClient(srv)
+
+			src := bytes.Repeat([]byte{1}, len(disk))
+			_, err := c.ImportSparseVDI(context.Background(), "OpaqueRef:vdi", int64(len(src)), bytes.NewReader(src))
+			if !IsCode(err, "VDI_IO_ERROR") {
+				t.Fatalf("err = %v, want VDI_IO_ERROR", err)
+			}
+			ft.check(t)
+		})
+	}
+}
+
+// TestImportRawVDIWriteFailure is TestImportSparseVDIWriteFailure for the plain import.
+func TestImportRawVDIWriteFailure(t *testing.T) {
+	for _, status := range []string{"success", "failure"} {
+		t.Run(status, func(t *testing.T) {
+			ft := &fakeTasks{status: status, errorInfo: []string{"VDI_IO_ERROR", "Device I/O errors"}}
+			srv := httptest.NewTLSServer(withTasks(t, ft, func(w http.ResponseWriter, r *http.Request) {
+				conn, rw, err := http.NewResponseController(w).Hijack()
+				if err != nil {
+					t.Errorf("hijack: %v", err)
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				_, _ = fmt.Fprint(rw, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+				_ = rw.Flush()
+				if _, err := io.CopyN(io.Discard, rw, r.ContentLength); err != nil {
+					t.Errorf("reading body: %v", err)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			c := testClient(srv)
+			src := bytes.Repeat([]byte{1}, 1<<20)
+			err := c.ImportRawVDI(context.Background(), "OpaqueRef:vdi", int64(len(src)), bytes.NewReader(src))
+			if status == "failure" && !IsCode(err, "VDI_IO_ERROR") {
+				t.Fatalf("err = %v, want VDI_IO_ERROR", err)
+			}
+			if status == "success" && err != nil {
+				t.Fatal(err)
+			}
+			ft.check(t)
+		})
+	}
+}
+
+// TestImportResultWaitsForPendingTask covers a task read before xapi has ended it.
+func TestImportResultWaitsForPendingTask(t *testing.T) {
+	ft := &fakeTasks{status: "pending"}
+	srv := httptest.NewTLSServer(withTasks(t, ft, nil))
+	t.Cleanup(srv.Close)
+	c := testClient(srv)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		ft.mu.Lock()
+		ft.status = "success"
+		ft.mu.Unlock()
+	}()
+	if err := c.importResult(context.Background(), fakeTaskRef); err != nil {
+		t.Fatal(err)
+	}
+
+	ft.mu.Lock()
+	ft.status = "pending"
+	ft.mu.Unlock()
+	defer func(d time.Duration) { importTaskWait = d }(importTaskWait)
+	importTaskWait = 100 * time.Millisecond
+	if err := c.importResult(context.Background(), fakeTaskRef); err == nil || !strings.Contains(err.Error(), "pending") {
+		t.Fatalf("err = %v, want a still-pending error", err)
 	}
 }
