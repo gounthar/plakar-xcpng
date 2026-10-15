@@ -35,6 +35,17 @@ checks, then builds `linux/amd64`, `linux/arm64` and `linux/riscv64` packages wi
 1.1.7 and attaches them to a GitHub release with a `SHA256SUMS` file. A tag with a `-`
 suffix makes a pre-release. The packages are not signed yet.
 
+## What a backup leaves on the pool
+
+Nothing, normally. Each backup takes a temporary snapshot named `plakar-<time>`, marked
+`plakar_xcpng_snapshot` in its `other_config`, and destroys it with its disks at the end.
+The importer waits up to three minutes for xapi through a toolstack restart, and a watchdog
+process removes the snapshot if plakar is interrupted. A snapshot can still be left behind
+if the machine running plakar loses power or the watchdog is killed, or if xapi refuses to
+destroy it; the next backup of the same VM removes marked snapshots older than
+`stale_snapshot_age` (default `24h`, `0` disables). A complete backup whose cleanup failed
+is kept, with a warning naming the snapshot. Details in `docs/design.md`.
+
 ## Background
 
 What the measurements found, with plakar 1.1.7 on an 8 GiB disk holding 3.4 GiB of files:

@@ -100,6 +100,16 @@ For each selected VM:
 4. Wait for Plakar to acknowledge every record of this VM, then destroy the snapshot and
    its VDIs.
 
+If xapi stops answering during step 4, as during a toolstack restart, the importer waits
+for it for up to three minutes, logging in again when the restart has dropped the session.
+The VDIs are destroyed before the snapshot, so a VDI that cannot be destroyed leaves the
+marked snapshot (see below) for the sweep to find. If the snapshot still cannot be
+destroyed and every record of the VM was stored, the backup is kept and the importer
+prints a warning naming the snapshot: the sweep removes it at the first backup of the same
+VM that starts once it is older than `stale_snapshot_age`, or it has to be destroyed by
+hand, which is always the case with `stale_snapshot_age=0`.
+A backup that failed for another reason still fails, with the cleanup error added.
+
 Step 4 only runs if the connector is still alive, and an interrupted plakar does not
 leave it alive: plakar 1.1.7 starts plugins with `exec.CommandContext` and cancels that
 context on SIGINT or SIGTERM, which sends the plugin SIGKILL. So when it takes its first
