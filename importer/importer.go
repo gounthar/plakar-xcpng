@@ -542,6 +542,16 @@ func (p *Importer) destroyStaleSnapshots(ctx context.Context, vmRef string) erro
 		if err != nil || time.Since(t) < p.staleAge {
 			continue
 		}
+		// A backup that runs longer than staleAge is still reading its snapshot.
+		inUse, err := p.snapshotInUse(ctx, snap)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("stale snapshot %s: %w", s.UUID, err))
+			continue
+		}
+		if inUse {
+			_, _ = fmt.Fprintf(warnings, "xcpng: warning: stale snapshot %s left in place: one of its disks is attached, so a backup may still be reading it\n", s.UUID)
+			continue
+		}
 		errs = append(errs, p.destroySnapshot(ctx, snap))
 	}
 	return errors.Join(errs...)
@@ -628,28 +638,63 @@ func isHandleInvalid(err error, ref string) bool {
 	return errors.As(err, &xe) && xe.Code == "HANDLE_INVALID" && slices.Contains(xe.Params, ref)
 }
 
-func (p *Importer) destroySnapshotOnce(ctx context.Context, snapRef string) error {
+// snapshotVDIs returns the disk VDIs a snapshot owns: its snapshot copies, never a VDI
+// it merely shares with a VM.
+func (p *Importer) snapshotVDIs(ctx context.Context, snapRef string) ([]string, error) {
 	var vbds []string
 	if err := p.client.Call(ctx, &vbds, "VM.get_VBDs", snapRef); err != nil {
-		return fmt.Errorf("cleanup of snapshot %s: %w", snapRef, err)
+		return nil, err
 	}
 	var vdis []string
 	for _, vbdRef := range vbds {
 		var vbd xapi.VBDRecord
 		if err := p.client.Call(ctx, &vbd, "VBD.get_record", vbdRef); err != nil {
-			return fmt.Errorf("cleanup of snapshot %s: %w", snapRef, err)
+			return nil, err
 		}
 		if vbd.Type != "Disk" || vbd.VDI == xapi.NullRef {
 			continue
 		}
-		// Only snapshot copies: never a VDI the snapshot merely shares with a VM.
 		var isSnap bool
 		if err := p.client.Call(ctx, &isSnap, "VDI.get_is_a_snapshot", vbd.VDI); err != nil {
-			return fmt.Errorf("cleanup of snapshot %s: %w", snapRef, err)
+			return nil, err
 		}
 		if isSnap {
 			vdis = append(vdis, vbd.VDI)
 		}
+	}
+	return vdis, nil
+}
+
+// snapshotInUse reports whether a disk of the snapshot is attached anywhere. An export
+// plugs the VDI into dom0 for as long as it streams, so this is how a backup still
+// reading the snapshot shows.
+func (p *Importer) snapshotInUse(ctx context.Context, snapRef string) (bool, error) {
+	vdis, err := p.snapshotVDIs(ctx, snapRef)
+	if err != nil {
+		return false, err
+	}
+	for _, vdi := range vdis {
+		var vbds []string
+		if err := p.client.Call(ctx, &vbds, "VDI.get_VBDs", vdi); err != nil {
+			return false, err
+		}
+		for _, vbd := range vbds {
+			var attached bool
+			if err := p.client.Call(ctx, &attached, "VBD.get_currently_attached", vbd); err != nil {
+				return false, err
+			}
+			if attached {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func (p *Importer) destroySnapshotOnce(ctx context.Context, snapRef string) error {
+	vdis, err := p.snapshotVDIs(ctx, snapRef)
+	if err != nil {
+		return fmt.Errorf("cleanup of snapshot %s: %w", snapRef, err)
 	}
 
 	// The VDIs go first. If one cannot be destroyed, the snapshot VM stays, with its

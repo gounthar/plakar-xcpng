@@ -28,6 +28,9 @@ type snapshotXAPI struct {
 	// hang makes every call wait until the client gives up, as with a host that
 	// stopped answering without closing connections.
 	hang bool
+	// attached lists the snapshot VDIs that have an attached VBD, as during an export,
+	// which plugs the VDI into dom0.
+	attached map[string]bool
 
 	mu        sync.Mutex
 	calls     []string // "VDI.destroy <ref>", "VM.destroy <ref>"
@@ -105,6 +108,23 @@ func (f *snapshotXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	case "VDI.get_is_a_snapshot":
 		result = true
+	case "VM.get_snapshots":
+		result = []string{"OpaqueRef:snap"}
+	case "VM.get_record":
+		result = snapshotSummary{
+			UUID:         "snap-uuid",
+			OtherConfig:  map[string]string{snapshotMarker: "snap-uuid"},
+			SnapshotTime: "20261001T00:00:00Z",
+		}
+	case "VDI.get_VBDs":
+		// The snapshot VM's own VBD, and dom0's VBD while the VDI is attached there.
+		vbds := []string{"OpaqueRef:snapvbd-" + arg(1)}
+		if f.attached[arg(1)] {
+			vbds = append(vbds, "OpaqueRef:dom0vbd-"+arg(1))
+		}
+		result = vbds
+	case "VBD.get_currently_attached":
+		result = strings.HasPrefix(arg(1), "OpaqueRef:dom0vbd-")
 	case "VDI.destroy", "VM.destroy":
 		f.mu.Lock()
 		f.calls = append(f.calls, req.Method+" "+arg(1))
@@ -296,5 +316,43 @@ func TestFinishSnapshotFailsWhenAStreamFailed(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Errorf("unexpected warning %q", out.String())
+	}
+}
+
+// The sweep destroys a marked snapshot older than stale_snapshot_age.
+func TestSweepDestroysStaleSnapshot(t *testing.T) {
+	f := &snapshotXAPI{}
+	p := dialFake(t, f)
+	p.staleAge = time.Hour
+	if err := p.destroyStaleSnapshots(context.Background(), "OpaqueRef:vm"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"VDI.destroy OpaqueRef:vdi-a", "VDI.destroy OpaqueRef:vdi-b", "VM.destroy OpaqueRef:snap"}
+	if !slices.Equal(f.calls, want) {
+		t.Errorf("calls = %q, want %q", f.calls, want)
+	}
+}
+
+// A backup that runs longer than stale_snapshot_age is still exporting its snapshot.
+// Another backup of the same VM must leave it alone: xapi refuses VDI.destroy on the
+// attached disk, and the sweep used to retry that for two minutes, then fail the
+// second backup.
+func TestSweepSkipsSnapshotWithAttachedDisk(t *testing.T) {
+	var buf strings.Builder
+	old := warnings
+	warnings = &buf
+	t.Cleanup(func() { warnings = old })
+
+	f := &snapshotXAPI{attached: map[string]bool{"OpaqueRef:vdi-b": true}}
+	p := dialFake(t, f)
+	p.staleAge = time.Hour
+	if err := p.destroyStaleSnapshots(context.Background(), "OpaqueRef:vm"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("calls = %q, want none", f.calls)
+	}
+	if !strings.Contains(buf.String(), "snap-uuid") {
+		t.Errorf("warning = %q, want one naming the snapshot", buf.String())
 	}
 }
