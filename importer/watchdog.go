@@ -55,7 +55,7 @@ func startWatchdog(config map[string]string) (*watchdog, error) {
 		return nil, fmt.Errorf("snapshot watchdog: %w", err)
 	}
 
-	cmd := exec.Command(exe, WatchdogArg)
+	cmd := watchdogCommand(exe, WatchdogArg)
 	cmd.Stderr = os.Stderr
 	w, err := cmd.StdinPipe()
 	if err != nil {
@@ -75,6 +75,14 @@ func startWatchdog(config map[string]string) (*watchdog, error) {
 		return nil, err
 	}
 	return wd, nil
+}
+
+// watchdogCommand builds the command that starts the watchdog child, detached from the
+// plugin's process group where the platform allows it.
+func watchdogCommand(exe string, args ...string) *exec.Cmd {
+	cmd := exec.Command(exe, args...)
+	detach(cmd)
+	return cmd
 }
 
 func (wd *watchdog) send(line string) error {

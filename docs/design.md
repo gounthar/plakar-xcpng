@@ -114,7 +114,9 @@ Step 4 only runs if the connector is still alive, and an interrupted plakar does
 leave it alive: plakar 1.1.7 starts plugins with `exec.CommandContext` and cancels that
 context on SIGINT or SIGTERM, which sends the plugin SIGKILL. So when it takes its first
 snapshot, the importer starts a copy of itself as a watchdog, which ignores SIGINT,
-SIGTERM and SIGHUP. The importer tells it over a pipe which snapshots exist (the
+SIGTERM and SIGHUP. On Unix the watchdog runs in a session of its own, so a signal sent
+to plakar's whole process group, such as `kill -9 -<pgid>` from a shell, does not reach
+it either. The importer tells it over a pipe which snapshots exist (the
 connector configuration goes over the same pipe, not the command line, because it holds
 the password). If the pipe closes while a snapshot is still listed, the importer died, and
 the watchdog destroys that snapshot and its VDIs, after checking the marker below.
@@ -291,7 +293,10 @@ With the watchdog, a backup interrupted with SIGTERM, and another with SIGINT, f
 seconds into streaming an 8 GiB VDI left no snapshot and no snapshot VDI; the watchdog
 was done about two seconds after plakar exited. A first version without the
 `VDI_IN_USE` retry destroyed the snapshot but left its VDI. An uninterrupted backup
-afterwards completed and left neither a snapshot nor a watchdog process.
+afterwards completed and left neither a snapshot nor a watchdog process. Before the
+watchdog had a session of its own, SIGKILL sent to plakar's whole process group
+fifteen seconds into streaming killed the watchdog too and left the snapshot and its
+VDI; with it, the watchdog destroyed both.
 
 A running Debian 12 UEFI guest with a vTPM: with `vtpm` unset the backup was refused
 before any snapshot was taken; with `include` the restored VM got a vTPM whose contents
