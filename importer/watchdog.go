@@ -159,7 +159,7 @@ func readWatchdog(r io.Reader) (map[string]string, []string, error) {
 
 // RunWatchdog is the watchdog child's main. It returns the process exit status.
 func RunWatchdog(stdin io.Reader) int {
-	signal.Ignore(os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	ignoreWatchdogSignals()
 
 	config, pending, err := readWatchdog(stdin)
 	if err != nil {
@@ -177,6 +177,13 @@ func RunWatchdog(stdin io.Reader) int {
 		return 1
 	}
 	return 0
+}
+
+// ignoreWatchdogSignals makes the watchdog outlive the interrupts that end plakar.
+// SIGPIPE too: stderr may be a pipe whose reader died with plakar, and Go exits on
+// SIGPIPE from a write to stderr, which would stop the cleanup half way.
+func ignoreWatchdogSignals() {
+	signal.Ignore(os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGPIPE)
 }
 
 func destroyLeftovers(ctx context.Context, config map[string]string, uuids []string) error {

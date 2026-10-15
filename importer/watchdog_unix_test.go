@@ -25,6 +25,8 @@ func TestMain(m *testing.M) {
 		os.Exit(helperPlugin())
 	case "watchdog":
 		os.Exit(helperWatchdog())
+	case "watchdog-stderr":
+		os.Exit(helperWatchdogStderr())
 	}
 	os.Exit(m.Run())
 }
@@ -51,6 +53,45 @@ func helperWatchdog() int {
 		return 1
 	}
 	return 0
+}
+
+// helperWatchdogStderr sets up signals as the watchdog does, waits for its pipe to close,
+// writes to stderr as the watchdog does when it reports, then leaves the marker.
+func helperWatchdogStderr() int {
+	ignoreWatchdogSignals()
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	_, _ = os.Stderr.WriteString("xcpng: cleanup of snapshot x: retrying\n")
+	return helperWatchdog()
+}
+
+// When plakar's output goes through a pipe (`plakar ... 2>&1 | tee log`), the reader can
+// die with plakar while the watchdog lives on. Its next stderr write must fail, not kill
+// it with SIGPIPE before it has cleaned up.
+func TestWatchdogSurvivesDeadStderrReader(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), helperEnv+"=watchdog-stderr", "XCPNG_WATCHDOG_TEST_MARKER="+marker)
+	cmd.Stderr = w
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	_ = r.Close() // the reader is gone
+	_ = stdin.Close()
+
+	err = cmd.Wait()
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("the watchdog died writing to a dead stderr: %v", err)
+	}
 }
 
 // A SIGKILL to the plugin's whole process group, as `kill -9 -<pgid>` from a shell or a
