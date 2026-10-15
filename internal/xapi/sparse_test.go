@@ -221,6 +221,29 @@ func TestImportSparseVDIShortSource(t *testing.T) {
 	}
 }
 
+func TestWriteVDIAtSendsOneChunk(t *testing.T) {
+	disk := bytes.Repeat([]byte{9}, 8192)
+	want := bytes.Clone(disk)
+	data := bytes.Repeat([]byte{4}, 1024)
+	copy(want[6144:], data)
+
+	var got received
+	c := testClient(chunkedServer(t, disk, http.StatusOK, &got))
+	if err := c.WriteVDIAt(context.Background(), "OpaqueRef:vdi", 6144, data); err != nil {
+		t.Fatal(err)
+	}
+	<-got.done
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if len(got.chunks) != 1 || got.chunks[0] != (chunk{6144, 1024}) {
+		t.Fatalf("chunks = %v, want one of 1024 bytes at 6144", got.chunks)
+	}
+	if !bytes.Equal(disk, want) {
+		t.Fatal("bytes outside the chunk changed, or the chunk was not written")
+	}
+}
+
 func TestSRZeroesNewVDIs(t *testing.T) {
 	for _, tc := range []struct {
 		typ  string

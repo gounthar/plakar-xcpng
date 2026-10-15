@@ -79,6 +79,7 @@ Exporter:
 | `keep_mac` | give the VIFs their original MAC addresses, default `false` |
 | `keep_tags` | give the VM the original's tags, default `false` |
 | `keep_secureboot_update` | let the target pool replace the VM's Secure Boot keys at next boot, default `false` (see below) |
+| `allow_incomplete_disks` | restore a VM whose backup holds a disk shorter than the disk was, default `false` (see below) |
 
 ## Backup (importer)
 
@@ -165,6 +166,23 @@ Nothing guarantees that `vm.json` arrives before the disks, so:
    vTPM is recreated unique with the original's state, which gives the copy the same TPM
    identity and sealed secrets: that is what a disaster-recovery restore needs, and what
    `is_unique` exists to prevent while the original runs, so the restore warns.
+   Before any of this, each restored disk's size is checked against the `virtual_size`
+   in `vm.json`. Older versions could store a disk whose export was cut short; such a VM
+   is refused and its restored VDIs destroyed. With `allow_incomplete_disks=true`, a
+   short disk is grown to its recorded size with `VDI.resize` and the VM is restored with
+   a warning naming the disk: the missing end reads as zeroes, so the guest may find a
+   damaged filesystem. That holds only where a new VDI reads as zeroes, so on the SRs
+   listed in step 1 the disk is still refused. A disk larger than recorded is always
+   refused. The end of such a stored disk is not all disk data: the export stopped
+   wherever it stopped, often mid-sector, and the file can end with the HTTP error page
+   xapi wrote after its 200. With the option set, the restore keeps the last 64 KiB of
+   each disk back until the stream ends, removes an error page that ends exactly at the
+   end of the file, and stops at the last whole sector before it. The warning says how
+   many bytes that dropped. The page is recognised by its shape only, and a complete
+   disk can end with guest data of the same shape. Which one it was is known only once
+   `vm.json` is read, after the disk is written, so the removed bytes are kept: when
+   the stored size equals the recorded `virtual_size`, they are written back, as
+   stored, into the VDI in one chunk of the chunked import.
 4. Send the results: per `.raw` as it completes, per `vm.json` at the end.
 
 The restored VM is always a new VM. The prototype never overwrites an existing one.

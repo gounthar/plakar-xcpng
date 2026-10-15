@@ -330,6 +330,27 @@ const sparseBlock = 2 << 20
 // length is not known in advance, which net/http cannot send, so the request is
 // written on the TLS connection directly.
 func (c *Client) ImportSparseVDI(ctx context.Context, vdiRef string, size int64, r io.Reader) (int64, error) {
+	return c.importChunked(ctx, vdiRef, func(w *bufio.Writer) (int64, error) {
+		return writeChunks(w, size, r)
+	})
+}
+
+// WriteVDIAt writes data into an existing VDI at byte offset off, in one chunk of
+// xapi's chunked import, and leaves the rest of the VDI as it was. off and len(data)
+// must be whole 512-byte sectors.
+func (c *Client) WriteVDIAt(ctx context.Context, vdiRef string, off int64, data []byte) error {
+	_, err := c.importChunked(ctx, vdiRef, func(w *bufio.Writer) (int64, error) {
+		if err := writeChunk(w, off, data); err != nil {
+			return 0, err
+		}
+		return int64(len(data)), writeChunk(w, 0, nil)
+	})
+	return err
+}
+
+// importChunked sends a chunked import_raw_vdi request whose chunks body writes, and
+// returns what body reports as sent once xapi has finished the write.
+func (c *Client) importChunked(ctx context.Context, vdiRef string, body func(*bufio.Writer) (int64, error)) (int64, error) {
 	task, done, err := c.importTask(ctx)
 	if err != nil {
 		return 0, err
@@ -354,7 +375,14 @@ func (c *Client) ImportSparseVDI(ctx context.Context, vdiRef string, size int64,
 	defer stop()
 
 	w := bufio.NewWriterSize(conn, 64<<10)
-	sent, werr := writeChunked(w, u, size, r)
+	var sent int64
+	_, werr := fmt.Fprintf(w, "PUT %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", u.RequestURI(), u.Host)
+	if werr == nil {
+		werr = w.Flush()
+	}
+	if werr == nil {
+		sent, werr = body(w)
+	}
 	if se := (*sourceError)(nil); errors.As(werr, &se) {
 		// Closing the connection mid-stream makes xapi fail the import.
 		return sent, se.err
@@ -397,17 +425,11 @@ type sourceError struct{ err error }
 
 func (e *sourceError) Error() string { return e.err.Error() }
 
-func writeChunked(w *bufio.Writer, u *url.URL, size int64, r io.Reader) (int64, error) {
-	if _, err := fmt.Fprintf(w, "PUT %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", u.RequestURI(), u.Host); err != nil {
-		return 0, err
-	}
-	if err := w.Flush(); err != nil {
-		return 0, err
-	}
-
+// writeChunks writes size bytes from r as chunks, leaving out the 2 MiB blocks that
+// are all zeroes, then the end marker.
+func writeChunks(w *bufio.Writer, size int64, r io.Reader) (int64, error) {
 	buf := make([]byte, sparseBlock)
 	zero := make([]byte, sparseBlock)
-	var hdr [12]byte
 	var sent int64
 	for off := int64(0); off < size; {
 		n := int(min(int64(sparseBlock), size-off))
@@ -415,21 +437,27 @@ func writeChunked(w *bufio.Writer, u *url.URL, size int64, r io.Reader) (int64, 
 			return sent, &sourceError{fmt.Errorf("reading disk at offset %d: %w", off, err)}
 		}
 		if !bytes.Equal(buf[:n], zero[:n]) {
-			binary.LittleEndian.PutUint64(hdr[:8], uint64(off))
-			binary.LittleEndian.PutUint32(hdr[8:], uint32(n))
-			if _, err := w.Write(hdr[:]); err != nil {
-				return sent, err
-			}
-			if _, err := w.Write(buf[:n]); err != nil {
+			if err := writeChunk(w, off, buf[:n]); err != nil {
 				return sent, err
 			}
 			sent += int64(n)
 		}
 		off += int64(n)
 	}
-	clear(hdr[:])
-	_, err := w.Write(hdr[:])
-	return sent, err
+	return sent, writeChunk(w, 0, nil)
+}
+
+// writeChunk writes one chunk: its offset, its length and data. An empty chunk at
+// offset 0 is the end marker.
+func writeChunk(w *bufio.Writer, off int64, data []byte) error {
+	var hdr [12]byte
+	binary.LittleEndian.PutUint64(hdr[:8], uint64(off))
+	binary.LittleEndian.PutUint32(hdr[8:], uint32(len(data)))
+	if _, err := w.Write(hdr[:]); err != nil {
+		return err
+	}
+	_, err := w.Write(data)
+	return err
 }
 
 // SRZeroesNewVDIs reports whether a new VDI on an SR of this type reads as zeroes,
