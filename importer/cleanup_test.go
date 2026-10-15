@@ -3,8 +3,12 @@ package importer
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -224,5 +228,73 @@ func TestDestroySnapshotBoundsAHangingCall(t *testing.T) {
 	}
 	if d := time.Since(start); d > 3*time.Second {
 		t.Errorf("gave up after %s, want about 300ms", d)
+	}
+}
+
+// A complete backup is kept when only the snapshot cleanup fails: the snapshot is
+// marked, so the sweep removes it, and the user is told which one it is.
+func TestFinishSnapshotWarnsWhenOnlyCleanupFails(t *testing.T) {
+	var out strings.Builder
+	warnings = &out
+	t.Cleanup(func() { warnings = os.Stderr })
+	f := &snapshotXAPI{failVDI: "OpaqueRef:vdi-a"}
+	p := dialFake(t, f)
+	p.staleAge = defaultStaleAge
+	if err := p.finishSnapshot(context.Background(), nil, nil, "OpaqueRef:snap", "snap-uuid"); err != nil {
+		t.Fatalf("complete backup failed on cleanup: %v", err)
+	}
+	for _, want := range []string{"snap-uuid", "SR_BACKEND_FAILURE_1200", "24h0m0s"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("warning %q does not mention %q", out.String(), want)
+		}
+	}
+}
+
+// With the sweep disabled nothing will remove the snapshot: the warning says so.
+func TestFinishSnapshotWarnsSweepDisabled(t *testing.T) {
+	var out strings.Builder
+	warnings = &out
+	t.Cleanup(func() { warnings = os.Stderr })
+	f := &snapshotXAPI{failVDI: "OpaqueRef:vdi-a"}
+	p := dialFake(t, f)
+	if err := p.finishSnapshot(context.Background(), nil, nil, "OpaqueRef:snap", "snap-uuid"); err != nil {
+		t.Fatalf("complete backup failed on cleanup: %v", err)
+	}
+	if !strings.Contains(out.String(), "stale_snapshot_age is 0") {
+		t.Errorf("warning %q does not say the sweep is disabled", out.String())
+	}
+}
+
+// A backup that already failed still fails, and reports the cleanup error with it.
+func TestFinishSnapshotKeepsBackupError(t *testing.T) {
+	var out strings.Builder
+	warnings = &out
+	t.Cleanup(func() { warnings = os.Stderr })
+	f := &snapshotXAPI{failVDI: "OpaqueRef:vdi-a"}
+	p := dialFake(t, f)
+	backupErr := errors.New("export failed")
+	err := p.finishSnapshot(context.Background(), backupErr, nil, "OpaqueRef:snap", "snap-uuid")
+	if !errors.Is(err, backupErr) || !strings.Contains(fmt.Sprint(err), "SR_BACKEND_FAILURE_1200") {
+		t.Errorf("err = %v, want the backup error joined with the cleanup error", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("unexpected warning %q", out.String())
+	}
+}
+
+// A disk that Plakar failed to store makes the backup incomplete: the cleanup error
+// still fails it, as before.
+func TestFinishSnapshotFailsWhenAStreamFailed(t *testing.T) {
+	var out strings.Builder
+	warnings = &out
+	t.Cleanup(func() { warnings = os.Stderr })
+	f := &snapshotXAPI{failVDI: "OpaqueRef:vdi-a"}
+	p := dialFake(t, f)
+	err := p.finishSnapshot(context.Background(), nil, errResultsClosed, "OpaqueRef:snap", "snap-uuid")
+	if !strings.Contains(fmt.Sprint(err), "SR_BACKEND_FAILURE_1200") {
+		t.Errorf("err = %v, want the cleanup error", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("unexpected warning %q", out.String())
 	}
 }

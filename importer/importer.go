@@ -298,18 +298,11 @@ func (p *Importer) backupVM(ctx context.Context, vmRef string, records chan<- *c
 			p.deferred = append(p.deferred, takenSnapshot{ref: snapRef, uuid: snapUUID})
 			return
 		}
+		var streamErrs []error
 		for _, ch := range pending {
-			<-ch
+			streamErrs = append(streamErrs, <-ch)
 		}
-		// The caller's context may be cancelled; cleanup must still happen.
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
-		defer cancel()
-		if cerr := p.destroySnapshot(cleanupCtx, snapRef); cerr != nil {
-			err = errors.Join(err, cerr)
-		}
-		// Even on failure: the stale-snapshot sweep remains, and a watchdog retrying
-		// the same failing call would only delay the exit.
-		p.unwatch(snapUUID)
+		err = p.finishSnapshot(ctx, err, errors.Join(streamErrs...), snapRef, snapUUID)
 	}()
 
 	var snapTimeStr string
@@ -552,6 +545,34 @@ func (p *Importer) destroyStaleSnapshots(ctx context.Context, vmRef string) erro
 		errs = append(errs, p.destroySnapshot(ctx, snap))
 	}
 	return errors.Join(errs...)
+}
+
+// warnings receives the warnings that do not fail a backup.
+var warnings io.Writer = os.Stderr
+
+// finishSnapshot destroys the snapshot once the backup is done with it, and returns the
+// backup's result. A cleanup failure alone does not fail a complete backup: the
+// snapshot carries the marker, so the stale-snapshot sweep removes it later.
+// streamErr is what Plakar reported for the records; it only decides whether the
+// backup is complete, since Plakar reports those errors itself.
+func (p *Importer) finishSnapshot(ctx context.Context, backupErr, streamErr error, snapRef, snapUUID string) error {
+	// The caller's context may be cancelled; cleanup must still happen.
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cancel()
+	cerr := p.destroySnapshot(cleanupCtx, snapRef)
+	// Even on failure: the stale-snapshot sweep remains, and a watchdog retrying
+	// the same failing call would only delay the exit.
+	p.unwatch(snapUUID)
+	if cerr == nil || backupErr != nil || streamErr != nil {
+		return errors.Join(backupErr, cerr)
+	}
+	then := fmt.Sprintf("the next backup of this VM removes it once it is older than %s (stale_snapshot_age), or destroy it and its disks by hand", p.staleAge)
+	if p.staleAge == 0 {
+		then = "stale_snapshot_age is 0, so nothing will remove it: destroy it and its disks by hand"
+	}
+	fmt.Fprintf(warnings, "xcpng: warning: the backup is complete, but snapshot %s was not removed; %s: %s\n",
+		snapUUID, then, cerr)
+	return nil
 }
 
 // xapiDownRetry is how long cleanup waits for xapi to answer again. A toolstack restart
