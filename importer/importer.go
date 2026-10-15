@@ -557,7 +557,7 @@ func (p *Importer) destroyStaleSnapshots(ctx context.Context, vmRef string) erro
 // xapiDownRetry is how long cleanup waits for xapi to answer again. A toolstack restart
 // refuses connections for some seconds, then forgets every session; cleanup that gave up
 // at once leaked the snapshot and its disks, and failed a backup that was complete.
-const xapiDownRetry = 3 * time.Minute
+var xapiDownRetry = 3 * time.Minute
 
 // xapiDownDelay is the first wait between attempts; it doubles up to 10 seconds.
 var xapiDownDelay = time.Second
@@ -565,7 +565,10 @@ var xapiDownDelay = time.Second
 // destroySnapshot destroys a VM snapshot and its disk VDIs, waiting for xapi to come
 // back if it does not answer. VM.destroy alone leaves the VDIs behind.
 func (p *Importer) destroySnapshot(ctx context.Context, snapRef string) error {
-	deadline := time.Now().Add(xapiDownRetry)
+	// The bound covers the calls too: the HTTP client has no timeout, and some callers
+	// (the sweep, the early error paths) pass a context without a deadline.
+	ctx, cancel := context.WithTimeout(ctx, xapiDownRetry)
+	defer cancel()
 	delay := xapiDownDelay
 	for attempt := 0; ; attempt++ {
 		err := p.destroySnapshotOnce(ctx, snapRef)
@@ -577,14 +580,14 @@ func (p *Importer) destroySnapshot(ctx context.Context, snapRef string) error {
 			return nil
 		}
 		retry := xapi.IsUnavailable(err)
-		if xapi.IsCode(err, "SESSION_INVALID") {
-			// xapi restarted and forgot the session.
+		if xapi.IsCode(err, "SESSION_INVALID") || xapi.IsCode(err, "HOST_IS_SLAVE") {
+			// xapi restarted and forgot the session, or the pool has a new master.
 			lerr := p.client.Relogin(ctx)
 			retry = lerr == nil || xapi.IsUnavailable(lerr)
 			err = errors.Join(err, lerr)
 		}
-		if !retry || time.Now().After(deadline) {
-			return err
+		if !retry || ctx.Err() != nil {
+			return errors.Join(err, ctx.Err())
 		}
 		if attempt == 0 {
 			fmt.Fprintf(os.Stderr, "xcpng: cleanup of snapshot %s: xapi did not answer, retrying for up to %s: %s\n",

@@ -19,6 +19,11 @@ type snapshotXAPI struct {
 	// down is how many requests are dropped without an answer, as during a toolstack
 	// restart. Once one is dropped, the old session is invalid, as after a restart.
 	down int
+	// slave is how many calls answer HOST_IS_SLAVE, as after a master failover.
+	slave int
+	// hang makes every call wait until the client gives up, as with a host that
+	// stopped answering without closing connections.
+	hang bool
 
 	mu        sync.Mutex
 	calls     []string // "VDI.destroy <ref>", "VM.destroy <ref>"
@@ -42,6 +47,20 @@ func (f *snapshotXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
 			_ = conn.Close()
 		}
+		return
+	}
+	if f.hang {
+		f.mu.Unlock()
+		<-r.Context().Done()
+		return
+	}
+	if f.slave > 0 && req.Method != "session.login_with_password" {
+		f.slave--
+		f.restarted = true
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{"code": 1, "message": "HOST_IS_SLAVE", "data": []string{"127.0.0.1"}},
+		})
 		return
 	}
 	session := "OpaqueRef:session"
@@ -166,7 +185,44 @@ func TestDestroySnapshotGivesUpWhenXAPIStaysDown(t *testing.T) {
 
 func fastRetry(t *testing.T) {
 	t.Helper()
-	old := xapiDownDelay
+	oldDelay, oldRetry := xapiDownDelay, xapiDownRetry
 	xapiDownDelay = 10 * time.Millisecond
-	t.Cleanup(func() { xapiDownDelay = old })
+	t.Cleanup(func() { xapiDownDelay, xapiDownRetry = oldDelay, oldRetry })
+}
+
+// After a master failover the old master answers HOST_IS_SLAVE; cleanup must log in
+// again, which finds the new master.
+func TestDestroySnapshotFollowsNewMaster(t *testing.T) {
+	fastRetry(t)
+	f := &snapshotXAPI{}
+	p := dialFake(t, f)
+	f.mu.Lock()
+	f.slave = 1
+	f.mu.Unlock()
+	if err := p.destroySnapshot(context.Background(), "OpaqueRef:snap"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"VDI.destroy OpaqueRef:vdi-a", "VDI.destroy OpaqueRef:vdi-b", "VM.destroy OpaqueRef:snap"}
+	if !slices.Equal(f.calls, want) {
+		t.Errorf("calls = %q, want %q", f.calls, want)
+	}
+}
+
+// A call that never returns must not hold cleanup past its retry bound, even when the
+// caller's context has no deadline (the sweep, the early error paths).
+func TestDestroySnapshotBoundsAHangingCall(t *testing.T) {
+	fastRetry(t)
+	xapiDownRetry = 300 * time.Millisecond
+	f := &snapshotXAPI{}
+	p := dialFake(t, f)
+	f.mu.Lock()
+	f.hang = true
+	f.mu.Unlock()
+	start := time.Now()
+	if err := p.destroySnapshot(context.Background(), "OpaqueRef:snap"); err == nil {
+		t.Fatal("destroySnapshot succeeded with xapi hanging")
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("gave up after %s, want about 300ms", d)
+	}
 }
