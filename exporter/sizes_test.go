@@ -88,8 +88,8 @@ func TestCheckDiskSizesRefusesShortDisk(t *testing.T) {
 	vm := sizesVM
 
 	full := map[string]restoredDisk{
-		"/vm/a": {ref: "OpaqueRef:a", size: 4096},
-		"/vm/b": {ref: "OpaqueRef:b", size: 8192},
+		"/vm/a": {ref: "OpaqueRef:a", size: 4096, kept: 4096},
+		"/vm/b": {ref: "OpaqueRef:b", size: 8192, kept: 8192},
 	}
 	if err := p.checkDiskSizes(context.Background(), vm, full, true); err != nil {
 		t.Fatalf("complete disks refused: %v", err)
@@ -99,8 +99,8 @@ func TestCheckDiskSizesRefusesShortDisk(t *testing.T) {
 	}
 
 	short := map[string]restoredDisk{
-		"/vm/a": {ref: "OpaqueRef:a", size: 4096},
-		"/vm/b": {ref: "OpaqueRef:b", size: 1000},
+		"/vm/a": {ref: "OpaqueRef:a", size: 4096, kept: 4096},
+		"/vm/b": {ref: "OpaqueRef:b", size: 1000, kept: 1000},
 	}
 	err := p.checkDiskSizes(context.Background(), vm, short, true)
 	if err == nil || !strings.Contains(err.Error(), "disk-1") {
@@ -120,8 +120,8 @@ func TestCheckDiskSizesAllowIncompleteGrowsShortDisk(t *testing.T) {
 	p := sizesExporter(t, f, options{allowShort: true})
 
 	short := map[string]restoredDisk{
-		"/vm/a": {ref: "OpaqueRef:a", size: 4096},
-		"/vm/b": {ref: "OpaqueRef:b", size: 1000},
+		"/vm/a": {ref: "OpaqueRef:a", size: 4096, kept: 4096},
+		"/vm/b": {ref: "OpaqueRef:b", size: 1000, kept: 1000},
 	}
 	if err := p.checkDiskSizes(context.Background(), sizesVM, short, true); err != nil {
 		t.Fatalf("short disk refused with allow_incomplete_disks: %v", err)
@@ -153,8 +153,8 @@ func TestCheckDiskSizesAllowIncompleteStillRefuses(t *testing.T) {
 			f := &destroyRecorder{failResize: tc.failResize}
 			p := sizesExporter(t, f, options{allowShort: true})
 			restored := map[string]restoredDisk{
-				"/vm/a": {ref: "OpaqueRef:a", size: 4096},
-				"/vm/b": {ref: "OpaqueRef:b", size: tc.size},
+				"/vm/a": {ref: "OpaqueRef:a", size: 4096, kept: 4096},
+				"/vm/b": {ref: "OpaqueRef:b", size: tc.size, kept: tc.size},
 			}
 			err := p.checkDiskSizes(context.Background(), sizesVM, restored, tc.zeroed)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {

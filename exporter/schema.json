@@ -62,7 +62,7 @@
     "allow_incomplete_disks": {
       "type": "boolean",
       "default": false,
-      "description": "Restore a VM whose backup holds a disk shorter than the disk was (older versions could store a disk whose export was cut short). The disk is grown to its recorded size and the missing end reads as zeroes, so the guest may find a damaged filesystem. Off by default: such a VM is refused. Needs an SR whose new disks read as zeroes (file-based, or LVM with VHD)"
+      "description": "Restore a VM whose backup holds a disk shorter than the disk was (older versions could store a disk whose export was cut short). The disk is grown to its recorded size and the missing end reads as zeroes, so the guest may find a damaged filesystem. A part sector at the end, and an xapi error page stored after the data, are not restored. Off by default: such a VM is refused. Needs an SR whose new disks read as zeroes (file-based, or LVM with VHD)"
     }
   }
 }

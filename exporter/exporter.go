@@ -95,8 +95,10 @@ func (p *Exporter) Close(ctx context.Context) error {
 
 // restoredDisk is a VDI written from a disk record, and the size that record held.
 type restoredDisk struct {
-	ref  string
-	size int64
+	ref     string
+	size    int64
+	kept    int64  // bytes of disk data written, size or less
+	dropped string // what of the stored file was not restored, "" if nothing
 }
 
 type pendingVM struct {
@@ -152,9 +154,9 @@ func (p *Exporter) Export(ctx context.Context, records <-chan *connectors.Record
 			continue
 		}
 
-		ref, err := p.restoreDisk(ctx, srRef, sparse, base, record)
+		disk, err := p.restoreDisk(ctx, srRef, sparse, base, record)
 		if err == nil {
-			restored[dir+"/"+vdiUUID] = restoredDisk{ref: ref, size: record.FileInfo.Lsize}
+			restored[dir+"/"+vdiUUID] = disk
 		}
 		results <- record.Error(err) // Error(nil) closes the reader and reports success
 	}
@@ -209,8 +211,17 @@ func (p *Exporter) srZeroesNewVDIs(ctx context.Context, srRef string) (bool, err
 
 // restoreDisk creates a VDI and writes the record into it. With sparse set, only the
 // blocks holding data are sent, so a thin SR allocates only those.
-func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, name string, record *connectors.Record) (string, error) {
+//
+// With allow_incomplete_disks on such an SR, the end of the stored file goes through
+// shortTail: a part sector and a trailing xapi error page are not disk data.
+func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, name string, record *connectors.Record) (restoredDisk, error) {
 	size := record.FileInfo.Lsize
+	var r io.Reader = record.Reader
+	var tail *shortTail
+	if sparse && p.opts.allowShort {
+		tail = newShortTail(r, size)
+		r, size = tail, tail.limit
+	}
 	var ref string
 	err := p.client.Call(ctx, &ref, "VDI.create", map[string]any{
 		"name_label":       name,
@@ -226,21 +237,25 @@ func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, n
 		"tags":             []string{},
 	})
 	if err != nil {
-		return "", err
+		return restoredDisk{}, err
 	}
 
 	if sparse {
-		_, err = p.client.ImportSparseVDI(ctx, ref, size, record.Reader)
+		_, err = p.client.ImportSparseVDI(ctx, ref, size, r)
 	} else {
-		err = p.client.ImportRawVDI(ctx, ref, size, record.Reader)
+		err = p.client.ImportRawVDI(ctx, ref, size, r)
 	}
 	if err != nil {
 		if derr := p.client.Call(context.WithoutCancel(ctx), nil, "VDI.destroy", ref); derr != nil {
 			err = errors.Join(err, derr)
 		}
-		return "", err
+		return restoredDisk{}, err
 	}
-	return ref, nil
+	disk := restoredDisk{ref: ref, size: size, kept: size}
+	if tail != nil {
+		disk.kept, disk.dropped = tail.kept, tail.dropped()
+	}
+	return disk, nil
 }
 
 // vmCreateFields are the VM record fields copied into VM.create. Run-time state,
@@ -426,7 +441,13 @@ func (p *Exporter) checkDiskSizes(ctx context.Context, vm pendingVM, restored ma
 	var errs []error
 	for _, d := range vm.meta.Disks {
 		disk, ok := restored[vm.dir+"/"+d.VDIUUID]
-		if !ok || disk.size == d.VirtualSize {
+		if !ok {
+			continue
+		}
+		if disk.size == d.VirtualSize {
+			if disk.dropped != "" {
+				warnf("disk %s of %s: %s (allow_incomplete_disks=true)", d.File, vm.dir, disk.dropped)
+			}
 			continue
 		}
 		if disk.size > d.VirtualSize || !p.opts.allowShort {
@@ -443,8 +464,12 @@ func (p *Exporter) checkDiskSizes(ctx context.Context, vm pendingVM, restored ma
 			errs = append(errs, fmt.Errorf("growing disk %s of %s to %d bytes: %w", d.File, vm.dir, d.VirtualSize, err))
 			continue
 		}
-		warnf("disk %s of %s holds only %d of its %d bytes (the backup is incomplete): restored with the last %d bytes read as zeroes (allow_incomplete_disks=true)",
-			d.File, vm.dir, disk.size, d.VirtualSize, d.VirtualSize-disk.size)
+		note := ""
+		if disk.dropped != "" {
+			note = "; " + disk.dropped
+		}
+		warnf("disk %s of %s holds only %d of its %d bytes (the backup is incomplete): restored with the last %d bytes read as zeroes%s (allow_incomplete_disks=true)",
+			d.File, vm.dir, disk.kept, d.VirtualSize, d.VirtualSize-disk.kept, note)
 	}
 	if len(errs) == 0 {
 		return nil

@@ -173,7 +173,12 @@ Nothing guarantees that `vm.json` arrives before the disks, so:
    a warning naming the disk: the missing end reads as zeroes, so the guest may find a
    damaged filesystem. That holds only where a new VDI reads as zeroes, so on the SRs
    listed in step 1 the disk is still refused. A disk larger than recorded is always
-   refused.
+   refused. The end of such a stored disk is not all disk data: the export stopped
+   wherever it stopped, often mid-sector, and the file can end with the HTTP error page
+   xapi wrote after its 200. With the option set, the restore keeps the last 64 KiB of
+   each disk back until the stream ends, removes an error page that ends exactly at the
+   end of the file, and stops at the last whole sector before it. The warning says how
+   many bytes that dropped.
 4. Send the results: per `.raw` as it completes, per `vm.json` at the end.
 
 The restored VM is always a new VM. The prototype never overwrites an existing one.
