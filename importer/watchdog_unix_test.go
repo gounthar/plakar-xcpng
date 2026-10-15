@@ -44,7 +44,12 @@ func helperPlugin() int {
 	}
 	_, _ = io.WriteString(w, "ready\n")
 	_, _ = os.Stdout.WriteString("started\n")
-	select {} // until killed
+	// Sleeping rather than select{}: a blocked-forever main goroutine can be ended by
+	// the runtime's deadlock check, and an early exit would close the pipe and let the
+	// watchdog stand-in pass without surviving anything.
+	for {
+		time.Sleep(time.Hour) // until killed
+	}
 }
 
 func helperWatchdog() int {
