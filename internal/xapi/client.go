@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -50,11 +51,14 @@ func IsCode(err error, code string) bool {
 }
 
 type Client struct {
+	cfg    *Config
+	http   *http.Client
+	tls    *tls.Config
+	nextID atomic.Uint64
+
+	mu      sync.Mutex
 	base    string // https://host[:port]
-	http    *http.Client
-	tls     *tls.Config
 	session string
-	nextID  atomic.Uint64
 }
 
 // Dial logs in to the pool master. If the configured host is a pool member, it follows
@@ -63,43 +67,83 @@ func Dial(ctx context.Context, cfg *Config) (*Client, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: cfg.TLSInsecure} //nolint:gosec // opt-in, XCP-ng ships a self-signed certificate
 	c := &Client{
+		cfg:  cfg,
 		base: "https://" + cfg.Host,
 		http: &http.Client{Transport: transport},
 		tls:  transport.TLSClientConfig,
 	}
-
-	err := c.login(ctx, cfg)
-	var xe *Error
-	if errors.As(err, &xe) && xe.Code == "HOST_IS_SLAVE" && len(xe.Params) == 1 {
-		master := xe.Params[0]
-		if _, port, splitErr := net.SplitHostPort(cfg.Host); splitErr == nil {
-			master = net.JoinHostPort(master, port)
-		}
-		c.base = "https://" + master
-		err = c.login(ctx, cfg)
-	}
-	if err != nil {
+	if err := c.Relogin(ctx); err != nil {
 		return nil, err
 	}
 	return c, nil
 }
 
-func (c *Client) login(ctx context.Context, cfg *Config) error {
-	res, err := c.rpc(ctx, "session.login_with_password", []any{cfg.Username, cfg.Password, "1.0", "plakar-xcpng"})
+// Relogin opens a new session, for when the old one is gone: xapi keeps no session
+// across a toolstack restart, and the calls made with it fail with SESSION_INVALID.
+// It goes back to the configured host, so it also finds a new master after a failover.
+func (c *Client) Relogin(ctx context.Context) error {
+	base := "https://" + c.cfg.Host
+	session, err := c.login(ctx, base)
+	var xe *Error
+	if errors.As(err, &xe) && xe.Code == "HOST_IS_SLAVE" && len(xe.Params) == 1 {
+		master := xe.Params[0]
+		if _, port, splitErr := net.SplitHostPort(c.cfg.Host); splitErr == nil {
+			master = net.JoinHostPort(master, port)
+		}
+		base = "https://" + master
+		session, err = c.login(ctx, base)
+	}
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(res, &c.session)
+	c.mu.Lock()
+	c.base, c.session = base, session
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Client) login(ctx context.Context, base string) (string, error) {
+	res, err := c.rpcAt(ctx, base, "session.login_with_password",
+		[]any{c.cfg.Username, c.cfg.Password, "1.0", "plakar-xcpng"})
+	if err != nil {
+		return "", err
+	}
+	var session string
+	err = json.Unmarshal(res, &session)
+	return session, err
+}
+
+func (c *Client) current() (base, session string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.base, c.session
 }
 
 // Close logs the session out.
 func (c *Client) Close(ctx context.Context) error {
-	if c.session == "" {
+	_, session := c.current()
+	if session == "" {
 		return nil
 	}
-	_, err := c.rpc(ctx, "session.logout", []any{c.session})
+	_, err := c.rpc(ctx, "session.logout", []any{session})
+	c.mu.Lock()
 	c.session = ""
+	c.mu.Unlock()
 	return err
+}
+
+// unavailableError is a call that got no answer from xapi: the connection failed or
+// broke, or a proxy in front of it had no upstream. The call may or may not have run.
+type unavailableError struct{ err error }
+
+func (e *unavailableError) Error() string { return e.err.Error() }
+func (e *unavailableError) Unwrap() error { return e.err }
+
+// IsUnavailable reports whether err is a call that xapi did not answer, as during a
+// toolstack restart, rather than an error xapi returned.
+func IsUnavailable(err error) bool {
+	var ue *unavailableError
+	return errors.As(err, &ue)
 }
 
 type rpcRequest struct {
@@ -121,12 +165,17 @@ type rpcResponse struct {
 }
 
 func (c *Client) rpc(ctx context.Context, method string, params []any) (json.RawMessage, error) {
+	base, _ := c.current()
+	return c.rpcAt(ctx, base, method, params)
+}
+
+func (c *Client) rpcAt(ctx context.Context, base, method string, params []any) (json.RawMessage, error) {
 	body, err := json.Marshal(rpcRequest{JSONRPC: "2.0", Method: method, Params: params, ID: c.nextID.Add(1)})
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", method, err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/jsonrpc", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/jsonrpc", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", method, err)
 	}
@@ -134,17 +183,21 @@ func (c *Client) rpc(ctx context.Context, method string, params []any) (json.Raw
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", method, err)
+		return nil, fmt.Errorf("%s: %w", method, &unavailableError{err})
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return nil, fmt.Errorf("%s: %w", method, &unavailableError{fmt.Errorf("HTTP %s", resp.Status)})
+	default:
 		return nil, fmt.Errorf("%s: HTTP %s", method, resp.Status)
 	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", method, err)
+		return nil, fmt.Errorf("%s: %w", method, &unavailableError{err})
 	}
 	if len(data) > maxResponseSize {
 		return nil, fmt.Errorf("%s: response larger than %d bytes", method, maxResponseSize)
@@ -163,7 +216,8 @@ func (c *Client) rpc(ctx context.Context, method string, params []any) (json.Raw
 // Call runs an API method with the session as first argument and decodes the result
 // into out, which may be nil.
 func (c *Client) Call(ctx context.Context, out any, method string, args ...any) error {
-	res, err := c.rpc(ctx, method, append([]any{c.session}, args...))
+	_, session := c.current()
+	res, err := c.rpc(ctx, method, append([]any{session}, args...))
 	if err != nil {
 		return err
 	}
@@ -179,11 +233,12 @@ func (c *Client) Call(ctx context.Context, out any, method string, args ...any) 
 }
 
 func (c *Client) handlerURL(handler, vdiRef string) string {
+	base, session := c.current()
 	q := url.Values{}
-	q.Set("session_id", c.session)
+	q.Set("session_id", session)
 	q.Set("vdi", vdiRef)
 	q.Set("format", "raw")
-	return c.base + handler + "?" + q.Encode()
+	return base + handler + "?" + q.Encode()
 }
 
 // ExportRawVDI streams the content of a VDI as a raw disk image of size bytes, its

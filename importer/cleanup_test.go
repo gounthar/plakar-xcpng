@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"integration-xcpng/internal/xapi"
 )
@@ -15,9 +16,18 @@ import (
 // snapshot disks, and records every destroy call in order.
 type snapshotXAPI struct {
 	failVDI string // VDI ref whose VDI.destroy fails
+	// down is how many requests are dropped without an answer, as during a toolstack
+	// restart. Once one is dropped, the old session is invalid, as after a restart.
+	down int
+	// slave is how many calls answer HOST_IS_SLAVE, as after a master failover.
+	slave int
+	// hang makes every call wait until the client gives up, as with a host that
+	// stopped answering without closing connections.
+	hang bool
 
-	mu    sync.Mutex
-	calls []string // "VDI.destroy <ref>", "VM.destroy <ref>"
+	mu        sync.Mutex
+	calls     []string // "VDI.destroy <ref>", "VM.destroy <ref>"
+	restarted bool
 }
 
 func (f *snapshotXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -29,6 +39,35 @@ func (f *snapshotXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	f.mu.Lock()
+	if f.down > 0 {
+		f.down--
+		f.restarted = true
+		f.mu.Unlock()
+		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			_ = conn.Close()
+		}
+		return
+	}
+	if f.hang {
+		f.mu.Unlock()
+		<-r.Context().Done()
+		return
+	}
+	if f.slave > 0 && req.Method != "session.login_with_password" {
+		f.slave--
+		f.restarted = true
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{"code": 1, "message": "HOST_IS_SLAVE", "data": []string{"127.0.0.1"}},
+		})
+		return
+	}
+	session := "OpaqueRef:session"
+	if f.restarted {
+		session = "OpaqueRef:session-after-restart"
+	}
+	f.mu.Unlock()
 	arg := func(i int) string {
 		var s string
 		if i < len(req.Params) {
@@ -41,10 +80,14 @@ func (f *snapshotXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"error": map[string]any{"code": 1, "message": code, "data": []string{arg(1)}},
 		})
 	}
+	if req.Method != "session.login_with_password" && arg(0) != session {
+		fail("SESSION_INVALID")
+		return
+	}
 	var result any
 	switch req.Method {
 	case "session.login_with_password":
-		result = "OpaqueRef:session"
+		result = session
 	case "VM.get_VBDs":
 		result = []string{"OpaqueRef:vbd-a", "OpaqueRef:vbd-b", "OpaqueRef:vbd-cd"}
 	case "VBD.get_record":
@@ -99,5 +142,87 @@ func TestDestroySnapshotKeepsVMWhenAVDIFails(t *testing.T) {
 	want := []string{"VDI.destroy OpaqueRef:vdi-a", "VDI.destroy OpaqueRef:vdi-b"}
 	if !slices.Equal(f.calls, want) {
 		t.Errorf("calls = %q, want %q (no VM.destroy)", f.calls, want)
+	}
+}
+
+// A toolstack restart right after the export used to make cleanup fail at once with
+// "connection refused", leaking the snapshot and its VDIs. Cleanup must wait for XAPI
+// to come back and log in again, since sessions do not survive a restart.
+func TestDestroySnapshotWaitsForXAPIRestart(t *testing.T) {
+	fastRetry(t)
+	f := &snapshotXAPI{}
+	p := dialFake(t, f)
+	f.mu.Lock()
+	f.down = 3
+	f.mu.Unlock()
+	if err := p.destroySnapshot(context.Background(), "OpaqueRef:snap"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"VDI.destroy OpaqueRef:vdi-a", "VDI.destroy OpaqueRef:vdi-b", "VM.destroy OpaqueRef:snap"}
+	if !slices.Equal(f.calls, want) {
+		t.Errorf("calls = %q, want %q", f.calls, want)
+	}
+}
+
+// The wait for XAPI is bounded by the caller's context.
+func TestDestroySnapshotGivesUpWhenXAPIStaysDown(t *testing.T) {
+	fastRetry(t)
+	f := &snapshotXAPI{}
+	p := dialFake(t, f)
+	f.mu.Lock()
+	f.down = 1 << 30
+	f.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := p.destroySnapshot(ctx, "OpaqueRef:snap"); err == nil {
+		t.Fatal("destroySnapshot succeeded with XAPI down")
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("gave up after %s, want about 500ms", d)
+	}
+}
+
+func fastRetry(t *testing.T) {
+	t.Helper()
+	oldDelay, oldRetry := xapiDownDelay, xapiDownRetry
+	xapiDownDelay = 10 * time.Millisecond
+	t.Cleanup(func() { xapiDownDelay, xapiDownRetry = oldDelay, oldRetry })
+}
+
+// After a master failover the old master answers HOST_IS_SLAVE; cleanup must log in
+// again, which finds the new master.
+func TestDestroySnapshotFollowsNewMaster(t *testing.T) {
+	fastRetry(t)
+	f := &snapshotXAPI{}
+	p := dialFake(t, f)
+	f.mu.Lock()
+	f.slave = 1
+	f.mu.Unlock()
+	if err := p.destroySnapshot(context.Background(), "OpaqueRef:snap"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"VDI.destroy OpaqueRef:vdi-a", "VDI.destroy OpaqueRef:vdi-b", "VM.destroy OpaqueRef:snap"}
+	if !slices.Equal(f.calls, want) {
+		t.Errorf("calls = %q, want %q", f.calls, want)
+	}
+}
+
+// A call that never returns must not hold cleanup past its retry bound, even when the
+// caller's context has no deadline (the sweep, the early error paths).
+func TestDestroySnapshotBoundsAHangingCall(t *testing.T) {
+	fastRetry(t)
+	xapiDownRetry = 300 * time.Millisecond
+	f := &snapshotXAPI{}
+	p := dialFake(t, f)
+	f.mu.Lock()
+	f.hang = true
+	f.mu.Unlock()
+	start := time.Now()
+	if err := p.destroySnapshot(context.Background(), "OpaqueRef:snap"); err == nil {
+		t.Fatal("destroySnapshot succeeded with xapi hanging")
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("gave up after %s, want about 300ms", d)
 	}
 }

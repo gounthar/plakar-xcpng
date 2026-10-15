@@ -554,9 +554,60 @@ func (p *Importer) destroyStaleSnapshots(ctx context.Context, vmRef string) erro
 	return errors.Join(errs...)
 }
 
-// destroySnapshot destroys a VM snapshot and its disk VDIs. VM.destroy alone leaves
-// the VDIs behind.
+// xapiDownRetry is how long cleanup waits for xapi to answer again. A toolstack restart
+// refuses connections for some seconds, then forgets every session; cleanup that gave up
+// at once leaked the snapshot and its disks, and failed a backup that was complete.
+var xapiDownRetry = 3 * time.Minute
+
+// xapiDownDelay is the first wait between attempts; it doubles up to 10 seconds.
+var xapiDownDelay = time.Second
+
+// destroySnapshot destroys a VM snapshot and its disk VDIs, waiting for xapi to come
+// back if it does not answer. VM.destroy alone leaves the VDIs behind.
 func (p *Importer) destroySnapshot(ctx context.Context, snapRef string) error {
+	// The bound covers the calls too: the HTTP client has no timeout, and some callers
+	// (the sweep, the early error paths) pass a context without a deadline.
+	ctx, cancel := context.WithTimeout(ctx, xapiDownRetry)
+	defer cancel()
+	delay := xapiDownDelay
+	for attempt := 0; ; attempt++ {
+		err := p.destroySnapshotOnce(ctx, snapRef)
+		if err == nil {
+			return nil
+		}
+		// An earlier attempt may have destroyed the snapshot and lost the answer.
+		if attempt > 0 && isHandleInvalid(err, snapRef) {
+			return nil
+		}
+		retry := xapi.IsUnavailable(err)
+		if xapi.IsCode(err, "SESSION_INVALID") || xapi.IsCode(err, "HOST_IS_SLAVE") {
+			// xapi restarted and forgot the session, or the pool has a new master.
+			lerr := p.client.Relogin(ctx)
+			retry = lerr == nil || xapi.IsUnavailable(lerr)
+			err = errors.Join(err, lerr)
+		}
+		if !retry || ctx.Err() != nil {
+			return errors.Join(err, ctx.Err())
+		}
+		if attempt == 0 {
+			fmt.Fprintf(os.Stderr, "xcpng: cleanup of snapshot %s: xapi did not answer, retrying for up to %s: %s\n",
+				snapRef, xapiDownRetry, err)
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-time.After(delay):
+		}
+		delay = min(2*delay, 10*time.Second)
+	}
+}
+
+func isHandleInvalid(err error, ref string) bool {
+	var xe *xapi.Error
+	return errors.As(err, &xe) && xe.Code == "HANDLE_INVALID" && slices.Contains(xe.Params, ref)
+}
+
+func (p *Importer) destroySnapshotOnce(ctx context.Context, snapRef string) error {
 	var vbds []string
 	if err := p.client.Call(ctx, &vbds, "VM.get_VBDs", snapRef); err != nil {
 		return fmt.Errorf("cleanup of snapshot %s: %w", snapRef, err)
