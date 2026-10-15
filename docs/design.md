@@ -105,8 +105,9 @@ for it for up to three minutes, logging in again when the restart has dropped th
 The VDIs are destroyed before the snapshot, so a VDI that cannot be destroyed leaves the
 marked snapshot (see below) for the sweep to find. If the snapshot still cannot be
 destroyed and every record of the VM was stored, the backup is kept and the importer
-prints a warning naming the snapshot: the sweep removes it at the next backup of the same
-VM, or it has to be destroyed by hand, which is always the case with `stale_snapshot_age=0`.
+prints a warning naming the snapshot: the sweep removes it at the first backup of the same
+VM that starts once it is older than `stale_snapshot_age`, or it has to be destroyed by
+hand, which is always the case with `stale_snapshot_age=0`.
 A backup that failed for another reason still fails, with the cleanup error added.
 
 Step 4 only runs if the connector is still alive, and an interrupted plakar does not
