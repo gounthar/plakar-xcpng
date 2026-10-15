@@ -35,7 +35,9 @@ const tailRead = 1 << 20
 // zeroes, which on an SR that zeroes new VDIs reads the same as not writing them.
 //
 // Once the reader is drained, kept is the number of bytes of disk data it yielded and
-// page the length of the error page it found, 0 if none.
+// page the length of the error page it found, 0 if none. cut holds the stored bytes
+// from kept to the end of the file that it zeroed: a complete disk can end with guest
+// data shaped like the page, and only vm.json, read later, tells the two apart.
 type shortTail struct {
 	r     io.Reader
 	size  int64
@@ -45,6 +47,7 @@ type shortTail struct {
 	eof   bool
 	kept  int64
 	page  int
+	cut   []byte
 }
 
 func newShortTail(r io.Reader, size int64) *shortTail {
@@ -116,6 +119,7 @@ func (t *shortTail) trim() {
 	t.page = len(t.buf) - i
 	t.kept = min(t.limit, start-start%sector)
 	if from := t.kept - t.out; from < int64(len(t.buf)) {
+		t.cut = bytes.Clone(t.buf[from:])
 		clear(t.buf[from:])
 	}
 }

@@ -97,7 +97,9 @@ func (p *Exporter) Close(ctx context.Context) error {
 type restoredDisk struct {
 	ref     string
 	size    int64
+	stored  int64  // size of the stored file, which shortTail may round down to size
 	kept    int64  // bytes of disk data written, size or less
+	cut     []byte // the stored bytes from kept to the end of the file, if shortTail zeroed them
 	dropped string // what of the stored file was not restored, "" if nothing
 }
 
@@ -251,9 +253,9 @@ func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, n
 		}
 		return restoredDisk{}, err
 	}
-	disk := restoredDisk{ref: ref, size: size, kept: size}
+	disk := restoredDisk{ref: ref, size: size, stored: record.FileInfo.Lsize, kept: size}
 	if tail != nil {
-		disk.kept, disk.dropped = tail.kept, tail.dropped()
+		disk.kept, disk.cut, disk.dropped = tail.kept, tail.cut, tail.dropped()
 	}
 	return disk, nil
 }
@@ -434,14 +436,23 @@ func warnf(format string, args ...any) {
 // was cut short. Every disk restored for that VM is then destroyed, so the failed
 // restore leaves nothing behind.
 //
-// With allow_incomplete_disks, a short disk is grown to its recorded size instead and
-// the VM is restored with a warning. The grown part must read as zeroes, which only an
+// With allow_incomplete_disks, a disk that is complete after all gets back the end
+// shortTail took for an error page, and a short disk is grown to its recorded size
+// instead and the VM is restored with a warning. The grown part must read as zeroes, which only an
 // SR that zeroes new VDIs (zeroed) guarantees, so elsewhere the disk is still refused.
 func (p *Exporter) checkDiskSizes(ctx context.Context, vm pendingVM, restored map[string]restoredDisk, zeroed bool) error {
 	var errs []error
 	for _, d := range vm.meta.Disks {
 		disk, ok := restored[vm.dir+"/"+d.VDIUUID]
 		if !ok {
+			continue
+		}
+		if disk.cut != nil && disk.stored == d.VirtualSize {
+			// The disk is complete, so what shortTail took for xapi's error page
+			// is the guest's own data: put it back as it was stored.
+			if err := p.client.WriteVDIAt(ctx, disk.ref, disk.kept, disk.cut); err != nil {
+				errs = append(errs, fmt.Errorf("writing back the last %d bytes of disk %s of %s: %w", len(disk.cut), d.File, vm.dir, err))
+			}
 			continue
 		}
 		if disk.size == d.VirtualSize {

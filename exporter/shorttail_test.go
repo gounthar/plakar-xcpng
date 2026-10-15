@@ -63,6 +63,9 @@ func TestShortTailStripsErrorPage(t *testing.T) {
 			if tail.kept != int64(kept) || tail.page != len(xapiPage) {
 				t.Errorf("%d/%s: kept %d page %d, want %d %d", n, name, tail.kept, tail.page, kept, len(xapiPage))
 			}
+			if !bytes.Equal(tail.cut, file[kept:]) {
+				t.Errorf("%d/%s: cut holds %d bytes, want the %d stored from %d on", n, name, len(tail.cut), len(file)-kept, kept)
+			}
 			if d := tail.dropped(); !strings.Contains(d, "397-byte xapi error page") || !strings.Contains(d, " 194 bytes ") {
 				t.Errorf("%d/%s: dropped = %q", n, name, d)
 			}
@@ -90,7 +93,7 @@ func TestShortTailRoundsDownWithoutPage(t *testing.T) {
 func TestShortTailLeavesWholeDiskAlone(t *testing.T) {
 	file := randomBytes(64 * sector * 10)
 	tail, out := readTail(t, file, wrappers["half"])
-	if !bytes.Equal(out, file) || tail.dropped() != "" {
+	if !bytes.Equal(out, file) || tail.dropped() != "" || tail.cut != nil {
 		t.Errorf("whole disk: changed=%v dropped=%q", !bytes.Equal(out, file), tail.dropped())
 	}
 }

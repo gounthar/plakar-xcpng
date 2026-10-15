@@ -1,8 +1,13 @@
 package exporter
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,16 +17,57 @@ import (
 	"integration-xcpng/internal/xapi"
 )
 
-// destroyRecorder accepts login, VDI.destroy and VDI.resize, and records which VDIs
-// were destroyed and which were resized, as "ref size". VDI.resize fails if failResize.
+// destroyRecorder accepts login, VDI.destroy, VDI.resize, the task calls of an import
+// and chunked imports, and records which VDIs were destroyed, which were resized, as
+// "ref size", and the chunks written, as "ref offset" and the data. VDI.resize fails if
+// failResize.
 type destroyRecorder struct {
 	mu         sync.Mutex
 	destroyed  []string
 	resized    []string
+	written    map[string][]byte
 	failResize bool
 }
 
+// recordImport answers a chunked import_raw_vdi with 200 and records its chunks.
+func (f *destroyRecorder) recordImport(w http.ResponseWriter, r *http.Request) {
+	conn, rw, err := http.NewResponseController(w).Hijack()
+	if err != nil {
+		return
+	}
+	defer func() { _ = conn.Close() }()
+	_, _ = fmt.Fprint(rw, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+	_ = rw.Flush()
+	ref := r.URL.Query().Get("vdi")
+	br := bufio.NewReader(rw)
+	var hdr [12]byte
+	for {
+		if _, err := io.ReadFull(br, hdr[:]); err != nil {
+			return
+		}
+		off := binary.LittleEndian.Uint64(hdr[:8])
+		n := binary.LittleEndian.Uint32(hdr[8:])
+		if off == 0 && n == 0 {
+			return
+		}
+		data := make([]byte, n)
+		if _, err := io.ReadFull(br, data); err != nil {
+			return
+		}
+		f.mu.Lock()
+		if f.written == nil {
+			f.written = map[string][]byte{}
+		}
+		f.written[fmt.Sprintf("%s %d", ref, off)] = data
+		f.mu.Unlock()
+	}
+}
+
 func (f *destroyRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/import_raw_vdi" {
+		f.recordImport(w, r)
+		return
+	}
 	var req struct {
 		Method string            `json:"method"`
 		Params []json.RawMessage `json:"params"`
@@ -34,6 +80,12 @@ func (f *destroyRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch req.Method {
 	case "session.login_with_password":
 		result = "OpaqueRef:session"
+	case "task.create":
+		result = "OpaqueRef:task"
+	case "task.get_status":
+		result = "success"
+	case "task.destroy":
+		result = ""
 	case "VDI.destroy":
 		var ref string
 		_ = json.Unmarshal(req.Params[1], &ref)
@@ -167,5 +219,45 @@ func TestCheckDiskSizesAllowIncompleteStillRefuses(t *testing.T) {
 				t.Fatalf("destroyed %v, want both disks", f.destroyed)
 			}
 		})
+	}
+}
+
+// A complete disk whose end looked like xapi's error page had that end zeroed by
+// shortTail. Once vm.json shows the disk is complete, those bytes go back, unchanged.
+func TestCheckDiskSizesPutsBackTailOfCompleteDisk(t *testing.T) {
+	f := &destroyRecorder{}
+	p := sizesExporter(t, f, options{allowShort: true})
+	cut := bytes.Repeat([]byte{7}, 1024)
+	restored := map[string]restoredDisk{
+		"/vm/a": {ref: "OpaqueRef:a", size: 4096, kept: 4096},
+		"/vm/b": {ref: "OpaqueRef:b", size: 8192, stored: 8192, kept: 7168, cut: cut, dropped: "the stored file ended with a page"},
+	}
+	if err := p.checkDiskSizes(context.Background(), sizesVM, restored, true); err != nil {
+		t.Fatalf("complete disk refused: %v", err)
+	}
+	if got := f.written["OpaqueRef:b 7168"]; len(f.written) != 1 || !bytes.Equal(got, cut) {
+		t.Fatalf("written %d chunk(s), want the 1024 cut bytes back at 7168 of OpaqueRef:b", len(f.written))
+	}
+	if len(f.resized) != 0 || len(f.destroyed) != 0 {
+		t.Fatalf("resized %v, destroyed %v on a complete disk", f.resized, f.destroyed)
+	}
+}
+
+// A short disk keeps the page removed: nothing is written back.
+func TestCheckDiskSizesKeepsPageOffShortDisk(t *testing.T) {
+	f := &destroyRecorder{}
+	p := sizesExporter(t, f, options{allowShort: true})
+	restored := map[string]restoredDisk{
+		"/vm/a": {ref: "OpaqueRef:a", size: 4096, kept: 4096},
+		"/vm/b": {ref: "OpaqueRef:b", size: 4096, stored: 4096, kept: 3584, cut: bytes.Repeat([]byte{7}, 512), dropped: "page"},
+	}
+	if err := p.checkDiskSizes(context.Background(), sizesVM, restored, true); err != nil {
+		t.Fatalf("short disk refused with allow_incomplete_disks: %v", err)
+	}
+	if len(f.written) != 0 {
+		t.Fatalf("wrote %d chunk(s) back into a short disk", len(f.written))
+	}
+	if len(f.resized) != 1 || f.resized[0] != "OpaqueRef:b 8192" {
+		t.Fatalf("resized %v, want OpaqueRef:b to 8192", f.resized)
 	}
 }

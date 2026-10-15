@@ -178,7 +178,11 @@ Nothing guarantees that `vm.json` arrives before the disks, so:
    xapi wrote after its 200. With the option set, the restore keeps the last 64 KiB of
    each disk back until the stream ends, removes an error page that ends exactly at the
    end of the file, and stops at the last whole sector before it. The warning says how
-   many bytes that dropped.
+   many bytes that dropped. The page is recognised by its shape only, and a complete
+   disk can end with guest data of the same shape. Which one it was is known only once
+   `vm.json` is read, after the disk is written, so the removed bytes are kept: when
+   the stored size equals the recorded `virtual_size`, they are written back, as
+   stored, into the VDI in one chunk of the chunked import.
 4. Send the results: per `.raw` as it completes, per `vm.json` at the end.
 
 The restored VM is always a new VM. The prototype never overwrites an existing one.
