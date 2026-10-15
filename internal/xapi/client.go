@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // Protocol is the location scheme and the connector protocol name.
@@ -229,7 +230,12 @@ func (r *exactReader) Close() error { return r.rc.Close() }
 
 // ImportRawVDI writes size bytes from r into an existing VDI.
 func (c *Client) ImportRawVDI(ctx context.Context, vdiRef string, size int64, r io.Reader) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.handlerURL("/import_raw_vdi", vdiRef), io.LimitReader(r, size))
+	task, done, err := c.importTask(ctx)
+	if err != nil {
+		return err
+	}
+	defer done()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.handlerURL("/import_raw_vdi", vdiRef)+"&task_id="+url.QueryEscape(task), io.LimitReader(r, size))
 	if err != nil {
 		return err
 	}
@@ -240,12 +246,74 @@ func (c *Client) ImportRawVDI(ctx context.Context, vdiRef string, size int64, r 
 		return fmt.Errorf("import_raw_vdi: %w", redactURL(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-
 	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		return fmt.Errorf("import_raw_vdi: HTTP %s", resp.Status)
 	}
+	// xapi sends no length and closes the connection once the write is over.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	if err := c.importResult(ctx, task); err != nil {
+		return fmt.Errorf("import_raw_vdi: %w", err)
+	}
 	return nil
+}
+
+// importTask creates the task an import runs under, and returns it with a function
+// that destroys it. xapi answers an import with 200 before it writes the disk, and
+// reports a failure of the write on that task. What it sends on the connection after
+// the 200 varies: a 400, a 400 followed by a 500, or nothing before it closes, so the
+// connection alone cannot tell a failed write from a complete one.
+func (c *Client) importTask(ctx context.Context) (string, func(), error) {
+	var task string
+	if err := c.Call(ctx, &task, "task.create", "plakar import_raw_vdi", ""); err != nil {
+		return "", nil, fmt.Errorf("import_raw_vdi: %w", err)
+	}
+	done := func() {
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		_ = c.Call(dctx, nil, "task.destroy", task)
+	}
+	return task, done, nil
+}
+
+// importTaskWait bounds how long importResult waits for a task that is still
+// pending. xapi completes or fails the task before it closes the connection, so a
+// pending task after the close is not expected.
+var importTaskWait = 30 * time.Second
+
+// importResult returns the outcome of an import task, once the connection is closed.
+func (c *Client) importResult(ctx context.Context, task string) error {
+	deadline := time.Now().Add(importTaskWait)
+	for {
+		var status string
+		if err := c.Call(ctx, &status, "task.get_status", task); err != nil {
+			return err
+		}
+		switch status {
+		case "success":
+			return nil
+		case "failure":
+			var info []string
+			if err := c.Call(ctx, &info, "task.get_error_info", task); err != nil {
+				return err
+			}
+			if len(info) == 0 {
+				return errors.New("xapi failed the write with no error code")
+			}
+			return &Error{Code: info[0], Params: info[1:]}
+		case "pending":
+		default:
+			return fmt.Errorf("xapi task ended %s", status)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("xapi task still pending %s after the connection closed", importTaskWait)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 // sparseBlock is the unit in which ImportSparseVDI looks for zeroes: one VHD block.
@@ -262,7 +330,12 @@ const sparseBlock = 2 << 20
 // length is not known in advance, which net/http cannot send, so the request is
 // written on the TLS connection directly.
 func (c *Client) ImportSparseVDI(ctx context.Context, vdiRef string, size int64, r io.Reader) (int64, error) {
-	u, err := url.Parse(c.handlerURL("/import_raw_vdi", vdiRef) + "&chunked=true")
+	task, done, err := c.importTask(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer done()
+	u, err := url.Parse(c.handlerURL("/import_raw_vdi", vdiRef) + "&chunked=true&task_id=" + url.QueryEscape(task))
 	if err != nil {
 		return 0, err
 	}
@@ -310,11 +383,9 @@ func (c *Client) ImportSparseVDI(ctx context.Context, vdiRef string, size int64,
 	if werr != nil {
 		return sent, fmt.Errorf("import_raw_vdi: %w", werr)
 	}
-	// xapi closes the connection once the data is written to the VDI.
-	if _, err := io.Copy(io.Discard, io.LimitReader(br, 64<<10)); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return sent, ctxErr
-		}
+	// xapi closes the connection once the write is over.
+	_, _ = io.Copy(io.Discard, io.LimitReader(br, 64<<10))
+	if err := c.importResult(ctx, task); err != nil {
 		return sent, fmt.Errorf("import_raw_vdi: %w", err)
 	}
 	return sent, nil
