@@ -570,7 +570,7 @@ func (p *Importer) finishSnapshot(ctx context.Context, backupErr, streamErr erro
 	if p.staleAge == 0 {
 		then = "stale_snapshot_age is 0, so nothing will remove it: destroy it and its disks by hand"
 	}
-	fmt.Fprintf(warnings, "xcpng: warning: the backup is complete, but snapshot %s was not removed; %s: %s\n",
+	_, _ = fmt.Fprintf(warnings, "xcpng: warning: the backup is complete, but snapshot %s was not removed; %s: %s\n",
 		snapUUID, then, cerr)
 	return nil
 }
