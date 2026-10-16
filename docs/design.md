@@ -160,7 +160,10 @@ whose clock is off cannot sweep a fresh snapshot or keep an old one. A marked sn
 disk attached anywhere is left in place with a warning, whatever its age: an export plugs
 the VDI into dom0 for as long as it streams, so this is a backup still reading it. That
 check does not see a backup between two disks, or before its first export starts, when
-nothing is attached, so the age threshold still matters.
+nothing is attached, so the age threshold still matters. A sweep that fails (xapi refuses
+a destroy, or cannot list the snapshots) prints a warning and the backup goes on: the
+snapshots it could not remove are tried again at the next backup of the VM, and with
+`vm_tag` the other VMs are still backed up.
 
 vTPM: the TPM state holds whatever the guest sealed to it, typically the key that unlocks
 its encrypted disk. Storing it puts that key in the same backup as the disk, protected only
