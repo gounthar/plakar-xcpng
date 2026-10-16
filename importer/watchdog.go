@@ -28,7 +28,8 @@ import (
 // and the watchdog destroys them.
 //
 // Protocol, one line each: the connector configuration as JSON, then "+<snapshot uuid>"
-// when a snapshot is taken and "-<snapshot uuid>" once it is destroyed.
+// when a snapshot is taken and "-<snapshot uuid>" once it is destroyed. While VM.snapshot
+// has not returned, the snapshot is listed the same way as "<vm uuid>/<label>".
 const WatchdogArg = "--xcpng-snapshot-watchdog"
 
 // maxWatchdogLine bounds a protocol line; the configuration is the longest.
@@ -196,9 +197,19 @@ func destroyLeftovers(ctx context.Context, config map[string]string, uuids []str
 		return err
 	}
 	p := &Importer{cfg: cfg, client: client}
+	return errors.Join(p.destroyListed(ctx, uuids), client.Close(ctx))
+}
 
+// destroyListed destroys what the watchdog still lists: snapshots by UUID, and by
+// label those whose VM.snapshot call never returned.
+func (p *Importer) destroyListed(ctx context.Context, uuids []string) error {
+	client := p.client
 	var errs []error
 	for _, uuid := range uuids {
+		if vmUUID, label, ok := strings.Cut(uuid, "/"); ok {
+			errs = append(errs, p.destroyLabelledLeftover(ctx, vmUUID, label))
+			continue
+		}
 		var ref string
 		if err := client.Call(ctx, &ref, "VM.get_by_uuid", uuid); err != nil {
 			if xapi.IsCode(err, "UUID_INVALID") {
@@ -222,8 +233,26 @@ func destroyLeftovers(ctx context.Context, config map[string]string, uuids []str
 		}
 		fmt.Fprintf(os.Stderr, "xcpng: destroyed snapshot %s left by an interrupted backup\n", uuid)
 	}
-	errs = append(errs, client.Close(ctx))
 	return errors.Join(errs...)
+}
+
+// destroyLabelledLeftover destroys the snapshot a killed plugin was waiting for.
+func (p *Importer) destroyLabelledLeftover(ctx context.Context, vmUUID, label string) error {
+	var vmRef string
+	if err := p.client.Call(ctx, &vmRef, "VM.get_by_uuid", vmUUID); err != nil {
+		if xapi.IsCode(err, "UUID_INVALID") {
+			return nil // the VM is gone, and its snapshots cannot be found by label
+		}
+		return fmt.Errorf("snapshot %s of VM %s: %w", label, vmUUID, err)
+	}
+	n, err := p.destroyLabelled(ctx, vmRef, label)
+	if err != nil {
+		return fmt.Errorf("snapshot %s of VM %s: %w", label, vmUUID, err)
+	}
+	if n > 0 {
+		fmt.Fprintf(os.Stderr, "xcpng: destroyed snapshot %s of VM %s left by an interrupted backup\n", label, vmUUID)
+	}
+	return nil
 }
 
 // IsWatchdog reports whether the process was started as the snapshot watchdog.

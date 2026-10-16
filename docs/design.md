@@ -129,6 +129,18 @@ it either. The importer tells it over a pipe which snapshots exist (the
 connector configuration goes over the same pipe, not the command line, because it holds
 the password). If the pipe closes while a snapshot is still listed, the importer died, and
 the watchdog destroys that snapshot and its VDIs, after checking the marker below.
+
+The marker is set once `VM.snapshot` returns, but xapi finishes a snapshot even when the
+caller has stopped waiting: plakar interrupted, the connection lost, or the call's own
+one-hour bound reached. So each snapshot gets a label with a random part, and the importer
+lists the VM and that label with the watchdog before calling `VM.snapshot`, swapping it for
+the snapshot's UUID once marked. When the call ends without an answer from xapi, the
+importer, or the watchdog if the importer died, waits while the VM shows a `snapshot`
+operation, then destroys the VM's snapshots carrying exactly that label. The operation is
+read before the snapshot list, because xapi ends it only once the snapshot exists. An error
+returned by xapi means it took no snapshot, and nothing is looked for. The importer waits up
+to ten minutes; past that the label stays listed and the watchdog tries again when the
+importer exits, within its own ten-minute bound.
 VDI.destroy is retried for up to two minutes on `VDI_IN_USE`: xapi keeps a VDI attached
 for a moment after an export is cut off.
 
@@ -152,8 +164,9 @@ snapshot the connector takes is marked with `plakar_xcpng_snapshot=<its own UUID
 `other_config` (XAPI copies `other_config` on clone and revert, and a copied marker no
 longer matches the UUID of the object it lands on),
 and before step 1 the importer destroys the VM's marked snapshots older than
-`stale_snapshot_age`, with their VDIs, destroying only VDIs that are snapshot copies. Snapshots without the marker are never touched,
-whatever their name. The age threshold exists because two backups of the same VM can
+`stale_snapshot_age`, with their VDIs, destroying only VDIs that are snapshot copies. The sweep never touches snapshots without the
+marker, whatever their name; only the backup that chose a label, or its watchdog, destroys
+a snapshot by it. The age threshold exists because two backups of the same VM can
 overlap; it has to be longer than the longest backup of one VM. The age is measured on the
 pool master's clock (`host.get_servertime`), which stamped `snapshot_time`, so a plakar host
 whose clock is off cannot sweep a fresh snapshot or keep an old one. A marked snapshot with a
