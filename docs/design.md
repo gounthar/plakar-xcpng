@@ -62,6 +62,15 @@ Importer selection, exactly one of:
 | `vm_name` | every VM whose name-label is exactly this |
 | `vm_tag` | every VM carrying this tag |
 
+With `vm_name` or `vm_tag`, the VMs are backed up one after another into one snapshot, and
+an error on any of them fails the whole run: plakar commits no snapshot and exits 1, so
+the VMs already read are not kept either. This is deliberate. A failed VM could instead
+be recorded as an error entry in a snapshot that keeps the others, but plakar 1.1.7 then
+exits 0, and a scheduled backup that lost a VM would look successful: `restore` and
+`check` of that snapshot also succeed without mentioning it, and only `plakar info`
+counts the error. To keep one
+failing VM from holding back the rest, give each VM its own source (`vm_uuid`).
+
 Importer options:
 
 | Key | Meaning |
