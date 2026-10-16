@@ -31,6 +31,10 @@ const NullRef = "OpaqueRef:NULL"
 // get_all_records on VMs, which stay well below this on any real pool.
 const maxResponseSize = 256 << 20
 
+// callTimeout bounds a JSON-RPC call whose context has no deadline, so a host that
+// accepts the connection and never answers fails the call instead of hanging it.
+var callTimeout = 10 * time.Minute
+
 // Error is an error returned by XAPI, such as HANDLE_INVALID or HOST_IS_SLAVE.
 type Error struct {
 	Code   string
@@ -175,6 +179,11 @@ func (c *Client) rpcAt(ctx context.Context, base, method string, params []any) (
 		return nil, fmt.Errorf("%s: %w", method, err)
 	}
 
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, callTimeout)
+		defer cancel()
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/jsonrpc", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", method, err)

@@ -43,6 +43,13 @@ const snapshotMarker = "plakar_xcpng_snapshot"
 // backups of the same VM would destroy each other's snapshot.
 const defaultStaleAge = 24 * time.Hour
 
+// snapshotTimeout bounds VM.snapshot in place of the client's shorter per-call bound.
+// xapi finishes a snapshot even when the caller has given up, and the snapshot is
+// marked only once the call returns, so a call that gives up too early leaves a
+// snapshot the sweep never finds. How long a snapshot of a large VM takes has not
+// been measured; this value is a generous guess.
+var snapshotTimeout = time.Hour
+
 // Values of the vtpm option.
 const (
 	vtpmInclude = "include"
@@ -279,7 +286,9 @@ func (p *Importer) backupVM(ctx context.Context, vmRef string, records chan<- *c
 
 	var snapRef string
 	label := fmt.Sprintf("plakar-%s", time.Now().UTC().Format("20060102T150405Z"))
-	if err := p.client.Call(ctx, &snapRef, "VM.snapshot", vmRef, label); err != nil {
+	sctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
+	defer cancel()
+	if err := p.client.Call(sctx, &snapRef, "VM.snapshot", vmRef, label); err != nil {
 		return fmt.Errorf("snapshot of VM %s: %w", vmUUID, err)
 	}
 	// The marker holds the snapshot's own UUID: other_config is copied by clone and
