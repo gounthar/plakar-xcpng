@@ -114,6 +114,10 @@ func (f *snapshotXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "VM.get_snapshots":
 		result = []string{"OpaqueRef:snap"}
 	case "VM.get_record":
+		if arg(1) == "OpaqueRef:vm" {
+			result = map[string]string{"uuid": "vm-uuid"}
+			break
+		}
 		result = snapshotSummary{
 			UUID:         "snap-uuid",
 			OtherConfig:  map[string]string{snapshotMarker: "snap-uuid"},
@@ -381,5 +385,28 @@ func TestSweepUsesPoolClock(t *testing.T) {
 	}
 	if len(f.calls) != 0 {
 		t.Errorf("calls = %q, want none", f.calls)
+	}
+}
+
+// A snapshot the sweep cannot remove used to fail the backup, and with vm_tag every VM
+// after it. The sweep only tidies up what an earlier backup left: the backup goes on
+// and the user is told. The fake does not know VM.snapshot, so failing there shows the
+// backup got past the sweep.
+func TestSweepErrorDoesNotFailBackup(t *testing.T) {
+	var out strings.Builder
+	warnings = &out
+	t.Cleanup(func() { warnings = os.Stderr })
+	f := &snapshotXAPI{failVDI: "OpaqueRef:vdi-a"}
+	p := dialFake(t, f)
+	p.staleAge = time.Hour
+	p.vtpm = vtpmSkip
+	err := p.backupVM(context.Background(), "OpaqueRef:vm", nil, nil)
+	if !xapi.IsCode(err, "MESSAGE_METHOD_UNKNOWN") || xapi.IsCode(err, "SR_BACKEND_FAILURE_1200") {
+		t.Fatalf("err = %v, want the backup to reach VM.snapshot", err)
+	}
+	for _, want := range []string{"vm-uuid", "snap-uuid", "SR_BACKEND_FAILURE_1200"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("warning %q does not mention %q", out.String(), want)
+		}
 	}
 }

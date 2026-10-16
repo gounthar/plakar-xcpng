@@ -268,8 +268,13 @@ func (p *Importer) backupVM(ctx context.Context, vmRef string, records chan<- *c
 		}
 	}
 
+	// The sweep only removes what earlier backups left behind: a snapshot it cannot
+	// remove now is retried by the next backup, and is no reason to fail this one.
 	if err := p.destroyStaleSnapshots(ctx, vmRef); err != nil {
-		return fmt.Errorf("VM %s: %w", vmUUID, err)
+		if ctx.Err() != nil {
+			return fmt.Errorf("VM %s: %w", vmUUID, err)
+		}
+		_, _ = fmt.Fprintf(warnings, "xcpng: warning: VM %s: the stale-snapshot sweep failed, the backup goes on and the next backup of this VM tries again: %s\n", vmUUID, err)
 	}
 
 	var snapRef string
@@ -563,7 +568,9 @@ func (p *Importer) destroyStaleSnapshots(ctx context.Context, vmRef string) erro
 			_, _ = fmt.Fprintf(warnings, "xcpng: warning: stale snapshot %s left in place: one of its disks is attached, so a backup may still be reading it\n", s.UUID)
 			continue
 		}
-		errs = append(errs, p.destroySnapshot(ctx, snap))
+		if err := p.destroySnapshot(ctx, snap); err != nil {
+			errs = append(errs, fmt.Errorf("stale snapshot %s: %w", s.UUID, err))
+		}
 	}
 	return errors.Join(errs...)
 }
