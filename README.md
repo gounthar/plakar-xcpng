@@ -46,6 +46,22 @@ destroy it; the next backup of the same VM removes marked snapshots older than
 `stale_snapshot_age` (default `24h`, `0` disables). A complete backup whose cleanup failed
 is kept, with a warning naming the snapshot. Details in `docs/design.md`.
 
+If plakar runs as a systemd service, give the watchdog time to finish when the service
+stops, and leave `KillMode` at its default:
+
+```ini
+[Service]
+TimeoutStopSec=10min
+```
+
+`KillMode=mixed`, `systemctl kill -s KILL`, an OOM kill of the unit and stopping a
+container all kill the watchdog with plakar, so the snapshot stays until a backup of the
+same VM sweeps it once it is older than `stale_snapshot_age`. To list what the connector left on a pool:
+
+```sh
+xe snapshot-list params=uuid,name-label,snapshot-time,other-config | grep -B3 plakar_xcpng_snapshot
+```
+
 ## Background
 
 What the measurements found, with plakar 1.1.7 on an 8 GiB disk holding 3.4 GiB of files:
