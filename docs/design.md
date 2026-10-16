@@ -135,10 +135,14 @@ caller has stopped waiting: plakar interrupted, the connection lost, or the call
 one-hour bound reached. So each snapshot gets a label with a random part, and the importer
 lists the VM and that label with the watchdog before calling `VM.snapshot`, swapping it for
 the snapshot's UUID once marked. When the call ends without an answer from xapi, the
-importer, or the watchdog if the importer died, waits while the VM shows a `snapshot`
-operation, then destroys the VM's snapshots carrying exactly that label. The operation is
-read before the snapshot list, because xapi ends it only once the snapshot exists. An error
-returned by xapi means it took no snapshot, and nothing is looked for. The importer waits up
+importer, or the watchdog if the importer died, waits until the VM no longer shows a
+`snapshot` operation, then destroys the VM's snapshots carrying exactly that label. xapi
+names the snapshot record before it has copied its VBDs, VIFs and vTPMs, and ends the
+operation only once the snapshot is whole, so looking earlier could miss a half-made
+snapshot or destroy it while xapi works on it. An error returned by xapi means it took no
+snapshot: it deletes the record and the cloned disks before answering, and nothing is
+looked for. (Read in xen-api, `xapi_vm_clone.ml` `clone` and `xapi_vm_helpers.ml`
+`with_vm_operation`, upstream master; not checked on a host.) The importer waits up
 to ten minutes; past that the label stays listed and the watchdog tries again when the
 importer exits, within its own ten-minute bound.
 VDI.destroy is retried for up to two minutes on `VDI_IN_USE`: xapi keeps a VDI attached

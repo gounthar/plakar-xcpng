@@ -274,8 +274,11 @@ func snapshotLabel() string {
 // destroyLabelled destroys the snapshots of a VM named label, once xapi has finished
 // taking them. It returns how many it destroyed.
 //
-// The VM's operations are read before its snapshots: xapi ends the snapshot operation
-// only after the snapshot exists, so a list taken after the operation is gone shows it.
+// xapi names the snapshot record before it has copied the VBDs, VIFs and vTPMs, and
+// ends the snapshot operation only once the whole snapshot is made (xapi_vm_clone.ml,
+// clone; xapi_vm_helpers.ml, with_vm_operation). So the snapshots are listed only after
+// the operation is gone: earlier, a half-made snapshot may be missed or destroyed under
+// xapi's feet.
 func (p *Importer) destroyLabelled(ctx context.Context, vmRef, label string) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, labelledWait)
 	defer cancel()
@@ -284,29 +287,8 @@ func (p *Importer) destroyLabelled(ctx context.Context, vmRef, label string) (in
 		if err != nil {
 			return 0, err
 		}
-		var snaps []string
-		if err := p.client.Call(ctx, &snaps, "VM.get_snapshots", vmRef); err != nil {
-			return 0, err
-		}
-		var found []string
-		for _, snap := range snaps {
-			var name string
-			if err := p.client.Call(ctx, &name, "VM.get_name_label", snap); err != nil {
-				if xapi.IsCode(err, "HANDLE_INVALID") {
-					continue // destroyed since the list was read
-				}
-				return 0, err
-			}
-			if name == label {
-				found = append(found, snap)
-			}
-		}
-		if len(found) > 0 || !busy {
-			var errs []error
-			for _, snap := range found {
-				errs = append(errs, p.destroySnapshot(ctx, snap))
-			}
-			return len(found), errors.Join(errs...)
+		if !busy {
+			break
 		}
 		select {
 		case <-ctx.Done():
@@ -314,6 +296,30 @@ func (p *Importer) destroyLabelled(ctx context.Context, vmRef, label string) (in
 		case <-time.After(labelPollDelay):
 		}
 	}
+	var snaps []string
+	if err := p.client.Call(ctx, &snaps, "VM.get_snapshots", vmRef); err != nil {
+		return 0, err
+	}
+	var errs []error
+	n := 0
+	for _, snap := range snaps {
+		var name string
+		if err := p.client.Call(ctx, &name, "VM.get_name_label", snap); err != nil {
+			if !xapi.IsCode(err, "HANDLE_INVALID") { // else destroyed since the list was read
+				errs = append(errs, err)
+			}
+			continue
+		}
+		if name != label {
+			continue
+		}
+		if err := p.destroySnapshot(ctx, snap); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		n++
+	}
+	return n, errors.Join(errs...)
 }
 
 // snapshotting reports whether xapi is taking a snapshot of the VM.

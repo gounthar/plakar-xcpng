@@ -44,6 +44,9 @@ type snapshotXAPI struct {
 	// inProgress is how many VM.get_current_operations answers still show the
 	// snapshot being taken; the snapshot exists once that reaches 0.
 	inProgress int
+	// recordEarly makes the snapshot record exist while the operation still shows,
+	// as in xapi, which creates it before copying the VBDs, VIFs and vTPMs.
+	recordEarly bool
 
 	mu        sync.Mutex
 	calls     []string // "VDI.destroy <ref>", "VM.destroy <ref>"
@@ -138,7 +141,7 @@ func (f *snapshotXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Lock()
 		f.label = arg(2)
-		f.created = f.inProgress == 0
+		f.created = f.inProgress == 0 || f.recordEarly
 		f.mu.Unlock()
 		if f.snapshotHangs {
 			<-r.Context().Done()
@@ -152,7 +155,7 @@ func (f *snapshotXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.inProgress > 0 {
 			f.inProgress--
 			ops["OpaqueRef:task"] = "snapshot"
-			f.created = f.inProgress == 0
+			f.created = f.inProgress == 0 || f.recordEarly
 		}
 		f.mu.Unlock()
 		result = ops
@@ -196,6 +199,9 @@ func (f *snapshotXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result = strings.HasPrefix(arg(1), "OpaqueRef:dom0vbd-")
 	case "VDI.destroy", "VM.destroy":
 		f.mu.Lock()
+		if f.inProgress > 0 {
+			f.calls = append(f.calls, "while snapshotting")
+		}
 		f.calls = append(f.calls, req.Method+" "+arg(1))
 		f.mu.Unlock()
 		if req.Method == "VDI.destroy" && arg(1) == f.failVDI {
@@ -525,6 +531,23 @@ func TestSnapshotGivenUpOnIsDestroyed(t *testing.T) {
 func TestSnapshotStillInProgressIsAwaited(t *testing.T) {
 	fastSnapshotGiveUp(t)
 	f := &snapshotXAPI{labelled: true, snapshotHangs: true, inProgress: 3}
+	p := dialFake(t, f)
+	p.vtpm = vtpmSkip
+	fakeWatchdog(p)
+	if err := p.backupVM(context.Background(), "OpaqueRef:vm", nil, nil); err == nil {
+		t.Fatal("backup succeeded without a snapshot")
+	}
+	want := []string{"VDI.destroy OpaqueRef:vdi-a", "VDI.destroy OpaqueRef:vdi-b", "VM.destroy OpaqueRef:snap"}
+	if !slices.Equal(f.calls, want) {
+		t.Errorf("calls = %q, want %q", f.calls, want)
+	}
+}
+
+// xapi names the snapshot record before it has copied the VBDs, VIFs and vTPMs
+// (xapi_vm_clone.ml, clone): the lookup must leave it alone until the operation ends.
+func TestSnapshotRecordIsLeftAloneUntilFinished(t *testing.T) {
+	fastSnapshotGiveUp(t)
+	f := &snapshotXAPI{labelled: true, snapshotHangs: true, inProgress: 3, recordEarly: true}
 	p := dialFake(t, f)
 	p.vtpm = vtpmSkip
 	fakeWatchdog(p)
