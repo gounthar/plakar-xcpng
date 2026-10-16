@@ -529,6 +529,7 @@ func (p *Importer) destroyStaleSnapshots(ctx context.Context, vmRef string) erro
 		return err
 	}
 	var errs []error
+	var now time.Time
 	for _, snap := range snaps {
 		var s snapshotSummary
 		if err := p.client.Call(ctx, &s, "VM.get_record", snap); err != nil {
@@ -539,7 +540,17 @@ func (p *Importer) destroyStaleSnapshots(ctx context.Context, vmRef string) erro
 			continue
 		}
 		t, err := xapi.ParseTime(s.SnapshotTime)
-		if err != nil || time.Since(t) < p.staleAge {
+		if err != nil {
+			continue
+		}
+		// The pool master stamped snapshot_time, so its clock measures the age: the
+		// plakar host's clock may be off by more than staleAge.
+		if now.IsZero() {
+			if now, err = p.serverTime(ctx); err != nil {
+				return err
+			}
+		}
+		if now.Sub(t) < p.staleAge {
 			continue
 		}
 		// A backup that runs longer than staleAge is still reading its snapshot.
@@ -555,6 +566,25 @@ func (p *Importer) destroyStaleSnapshots(ctx context.Context, vmRef string) erro
 		errs = append(errs, p.destroySnapshot(ctx, snap))
 	}
 	return errors.Join(errs...)
+}
+
+// serverTime returns the pool master's clock.
+func (p *Importer) serverTime(ctx context.Context) (time.Time, error) {
+	var pools []string
+	if err := p.client.Call(ctx, &pools, "pool.get_all"); err != nil {
+		return time.Time{}, err
+	}
+	if len(pools) == 0 {
+		return time.Time{}, errors.New("xapi returned no pool")
+	}
+	var master, now string
+	if err := p.client.Call(ctx, &master, "pool.get_master", pools[0]); err != nil {
+		return time.Time{}, err
+	}
+	if err := p.client.Call(ctx, &now, "host.get_servertime", master); err != nil {
+		return time.Time{}, err
+	}
+	return xapi.ParseTime(now)
 }
 
 // warnings receives the warnings that do not fail a backup.

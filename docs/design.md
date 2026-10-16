@@ -131,7 +131,9 @@ longer matches the UUID of the object it lands on),
 and before step 1 the importer destroys the VM's marked snapshots older than
 `stale_snapshot_age`, with their VDIs, destroying only VDIs that are snapshot copies. Snapshots without the marker are never touched,
 whatever their name. The age threshold exists because two backups of the same VM can
-overlap; it has to be longer than the longest backup of one VM. A marked snapshot with a
+overlap; it has to be longer than the longest backup of one VM. The age is measured on the
+pool master's clock (`host.get_servertime`), which stamped `snapshot_time`, so a plakar host
+whose clock is off cannot sweep a fresh snapshot or keep an old one. A marked snapshot with a
 disk attached anywhere is left in place with a warning, whatever its age: an export plugs
 the VDI into dom0 for as long as it streams, so this is a backup still reading it. That
 check does not see a backup between two disks, or before its first export starts, when

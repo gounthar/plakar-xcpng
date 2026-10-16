@@ -31,6 +31,9 @@ type snapshotXAPI struct {
 	// attached lists the snapshot VDIs that have an attached VBD, as during an export,
 	// which plugs the VDI into dom0.
 	attached map[string]bool
+	// serverTime is what host.get_servertime answers; empty means one day after the
+	// snapshot was taken.
+	serverTime string
 
 	mu        sync.Mutex
 	calls     []string // "VDI.destroy <ref>", "VM.destroy <ref>"
@@ -115,6 +118,15 @@ func (f *snapshotXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			UUID:         "snap-uuid",
 			OtherConfig:  map[string]string{snapshotMarker: "snap-uuid"},
 			SnapshotTime: "20261001T00:00:00Z",
+		}
+	case "pool.get_all":
+		result = []string{"OpaqueRef:pool"}
+	case "pool.get_master":
+		result = "OpaqueRef:master"
+	case "host.get_servertime":
+		result = f.serverTime
+		if f.serverTime == "" {
+			result = "20261002T00:00:00Z"
 		}
 	case "VDI.get_VBDs":
 		// The snapshot VM's own VBD, and dom0's VBD while the VDI is attached there.
@@ -354,5 +366,20 @@ func TestSweepSkipsSnapshotWithAttachedDisk(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "snap-uuid") {
 		t.Errorf("warning = %q, want one naming the snapshot", buf.String())
+	}
+}
+
+// The sweep measures a snapshot's age on the pool's clock, which stamped snapshot_time.
+// Here the plakar host's clock is far ahead of the pool's: by the pool's clock the
+// snapshot is an hour old, and a backup may still be reading it.
+func TestSweepUsesPoolClock(t *testing.T) {
+	f := &snapshotXAPI{serverTime: "20261001T01:00:00Z"}
+	p := dialFake(t, f)
+	p.staleAge = 24 * time.Hour
+	if err := p.destroyStaleSnapshots(context.Background(), "OpaqueRef:vm"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("calls = %q, want none", f.calls)
 	}
 }
