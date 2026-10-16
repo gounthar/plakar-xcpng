@@ -123,8 +123,22 @@ the watchdog destroys that snapshot and its VDIs, after checking the marker belo
 VDI.destroy is retried for up to two minutes on `VDI_IN_USE`: xapi keeps a VDI attached
 for a moment after an export is cut off.
 
-The watchdog does not help if the machine running plakar loses power or the watchdog
-itself is killed; the snapshot then stays on the host and keeps its storage. So every
+Under systemd the watchdog is in the unit's cgroup, and its own session does not take it
+out. With the default `KillMode=control-group`, `systemctl stop` sends SIGTERM to every
+process of the unit, which the watchdog ignores, then waits for the cgroup to empty, and
+sends SIGKILL to what is left after `TimeoutStopSec`. So the timeout has to cover the
+watchdog's cleanup, which is bounded at ten minutes: up to three for xapi to come back,
+and up to two per disk on `VDI_IN_USE`. That bound starts when plakar drops the
+connector, a little after systemd's stop timer, so `TimeoutStopSec=11min` covers it with
+room to spare. It costs nothing in the usual case, as the stop returns once the cgroup is
+empty. `KillMode=mixed`
+sends SIGKILL to the rest of the cgroup as soon as plakar exits, so it always kills the
+watchdog. `systemctl kill -s KILL` and an OOM kill of the whole unit kill it too, and so
+does stopping a container, whose PID namespace dies with its first process.
+
+The watchdog does not help in those cases, or if the machine running plakar loses power
+or the watchdog itself is killed; the snapshot then stays on the host and keeps its
+storage. So every
 snapshot the connector takes is marked with `plakar_xcpng_snapshot=<its own UUID>` in its
 `other_config` (XAPI copies `other_config` on clone and revert, and a copied marker no
 longer matches the UUID of the object it lands on),
@@ -303,6 +317,14 @@ afterwards completed and left neither a snapshot nor a watchdog process. Before 
 watchdog had a session of its own, SIGKILL sent to plakar's whole process group
 fifteen seconds into streaming killed the watchdog too and left the snapshot and its
 VDI; with it, the watchdog destroyed both.
+
+Under systemd, with plakar run as a transient user unit and the unit stopped fifteen
+seconds into streaming a 16 GiB VDI, once per setting: with `TimeoutStopSec=5min` the
+watchdog destroyed the snapshot 1.1 seconds after plakar exited and `systemctl stop`
+returned after 1.3 seconds, leaving nothing. With `TimeoutStopSec=1s` systemd killed the
+watchdog half way, after it had destroyed the VDI, and the marked snapshot stayed. With
+`KillMode=mixed`, and with `systemctl kill -s KILL`, the watchdog was killed at once and
+the snapshot and its VDI stayed. The OOM and container cases were not run.
 
 A running Debian 12 UEFI guest with a vTPM: with `vtpm` unset the backup was refused
 before any snapshot was taken; with `include` the restored VM got a vTPM whose contents
