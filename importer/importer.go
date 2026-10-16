@@ -267,7 +267,7 @@ func labelKey(vmUUID, label string) string { return vmUUID + "/" + label }
 // second.
 func snapshotLabel() string {
 	var b [4]byte
-	_, _ = rand.Read(b[:])
+	_, _ = rand.Read(b[:]) // never fails since Go 1.24: it crashes the program instead
 	return fmt.Sprintf("plakar-%s-%s", time.Now().UTC().Format("20060102T150405Z"), hex.EncodeToString(b[:]))
 }
 
