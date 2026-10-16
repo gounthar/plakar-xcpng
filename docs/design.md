@@ -142,7 +142,10 @@ operation only once the snapshot is whole, so looking earlier could miss a half-
 snapshot or destroy it while xapi works on it. An error returned by xapi means it took no
 snapshot: it deletes the record and the cloned disks before answering, and nothing is
 looked for. (Read in xen-api, `xapi_vm_clone.ml` `clone` and `xapi_vm_helpers.ml`
-`with_vm_operation`, upstream master; not checked on a host.) The importer waits up
+`with_vm_operation`, upstream master. On an XCP-ng 8.3 host, plakar interrupted while
+`VM.snapshot` ran on a halted VM with eight disks: before this change the snapshot and its
+disks stayed, unmarked; with it the watchdog destroyed them, twice out of two. The
+importer's own lookup, after a timeout or a lost connection, was not run on a host.) The importer waits up
 to ten minutes; past that the label stays listed and the watchdog tries again when the
 importer exits, within its own ten-minute bound.
 VDI.destroy is retried for up to two minutes on `VDI_IN_USE`: xapi keeps a VDI attached
