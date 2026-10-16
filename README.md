@@ -51,7 +51,7 @@ stops, and leave `KillMode` at its default:
 
 ```ini
 [Service]
-TimeoutStopSec=10min
+TimeoutStopSec=11min
 ```
 
 `KillMode=mixed`, `systemctl kill -s KILL`, an OOM kill of the unit and stopping a

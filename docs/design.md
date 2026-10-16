@@ -128,8 +128,10 @@ out. With the default `KillMode=control-group`, `systemctl stop` sends SIGTERM t
 process of the unit, which the watchdog ignores, then waits for the cgroup to empty, and
 sends SIGKILL to what is left after `TimeoutStopSec`. So the timeout has to cover the
 watchdog's cleanup, which is bounded at ten minutes: up to three for xapi to come back,
-and up to two per disk on `VDI_IN_USE`. `TimeoutStopSec=10min` covers it, and costs
-nothing in the usual case, as the stop returns once the cgroup is empty. `KillMode=mixed`
+and up to two per disk on `VDI_IN_USE`. That bound starts when plakar drops the
+connector, a little after systemd's stop timer, so `TimeoutStopSec=11min` covers it with
+room to spare. It costs nothing in the usual case, as the stop returns once the cgroup is
+empty. `KillMode=mixed`
 sends SIGKILL to the rest of the cgroup as soon as plakar exits, so it always kills the
 watchdog. `systemctl kill -s KILL` and an OOM kill of the whole unit kill it too, and so
 does stopping a container, whose PID namespace dies with its first process.
