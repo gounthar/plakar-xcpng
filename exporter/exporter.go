@@ -225,9 +225,10 @@ func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, n
 		r, size = tail, tail.limit
 	}
 	var ref string
+	label := restoreLabel()
 	err := p.client.Call(ctx, &ref, "VDI.create", map[string]any{
-		"name_label":       name,
-		"name_description": "restored by plakar",
+		"name_label":       label,
+		"name_description": "restored by plakar from " + name,
 		"SR":               srRef,
 		"virtual_size":     size,
 		"type":             "user",
@@ -239,6 +240,11 @@ func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, n
 		"tags":             []string{},
 	})
 	if err != nil {
+		if mayHaveRun(err) {
+			if cerr := p.destroyLabelledVDI(context.WithoutCancel(ctx), srRef, label); cerr != nil {
+				err = errors.Join(err, fmt.Errorf("disk %s may be left behind as VDI %q: %w", name, label, cerr))
+			}
+		}
 		return restoredDisk{}, err
 	}
 
@@ -295,14 +301,26 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 		rec["tags"] = t
 	}
 	rec["affinity"] = xapi.NullRef
-	if oc, ok := rec["other_config"].(map[string]any); ok && !p.opts.keepMAC {
+	oc := map[string]any{}
+	if m, ok := src["other_config"].(map[string]any); ok {
+		maps.Copy(oc, m)
+	}
+	if !p.opts.keepMAC {
 		// A copy beside the original must not derive the same MAC addresses.
 		delete(oc, "mac_seed")
 	}
+	label := restoreLabel()
+	oc[restoreMarkerKey] = label
+	rec["other_config"] = oc
 
 	// A VM that is not made leaves its restored disks with no owner, so they go too.
 	var vmRef string
 	if err := p.client.Call(ctx, &vmRef, "VM.create", rec); err != nil {
+		if mayHaveRun(err) {
+			if cerr := p.destroyMarkedVM(context.WithoutCancel(ctx), rec["name_label"].(string), label); cerr != nil {
+				err = errors.Join(err, fmt.Errorf("VM %q may be left behind, marked other_config:%s=%s: %w", rec["name_label"], restoreMarkerKey, label, cerr))
+			}
+		}
 		return errors.Join(err, p.destroyDisks(ctx, vm, restored))
 	}
 
@@ -312,6 +330,9 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 			err = errors.Join(err, derr)
 		}
 		return errors.Join(err, p.destroyDisks(ctx, vm, restored))
+	}
+	if err := p.client.Call(ctx, nil, "VM.remove_from_other_config", vmRef, restoreMarkerKey); err != nil {
+		warnf("VM %q: removing other_config:%s: %s", name, restoreMarkerKey, err)
 	}
 
 	// XAPI copies never carry a unique vTPM's state; a restore does, by design.
