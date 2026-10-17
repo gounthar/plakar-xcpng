@@ -96,6 +96,7 @@ type restoreXAPI struct {
 	// dropSB drops VM.get_secureboot_certificates_state. sbReadiness, when set, is the
 	// VM's Secure Boot readiness, on a pool whose own readiness is not_ready.
 	dropSB      bool
+	dropSBOnce  bool // drops only the first VM.get_secureboot_certificates_state
 	sbReadiness string
 	// sessionLossOnce fails the first SR.get_current_operations with SESSION_INVALID,
 	// as after a toolstack restart; hangOnce never answers the first one. refuseVM
@@ -237,7 +238,8 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "VM.remove_from_other_config":
 		f.unmarked = append(f.unmarked, str(1)+" "+str(2))
 	case "VM.get_secureboot_certificates_state":
-		if f.dropSB {
+		if f.dropSB || f.dropSBOnce {
+			f.dropSBOnce = false
 			drop()
 			return
 		}
@@ -406,6 +408,9 @@ var sbVM = pendingVM{dir: "/vm", meta: xapi.VMMeta{
 var sbDisks = map[string]restoredDisk{"/vm/a": {ref: "OpaqueRef:a", size: 4096, kept: 4096}}
 
 func TestSecureBootCheckFailureDestroysVMAndDisks(t *testing.T) {
+	old := cleanupRetry
+	cleanupRetry = 50 * time.Millisecond
+	t.Cleanup(func() { cleanupRetry = old })
 	f := &restoreXAPI{dropSB: true}
 	p := restoreExporter(t, f)
 
@@ -589,5 +594,17 @@ func TestDiskBesideUnreadableVMJSONSaysSo(t *testing.T) {
 	err := got["/vm/"+xapi.DiskFilename("0", "a")]
 	if err == nil || strings.Contains(err.Error(), "no vm.json") {
 		t.Fatalf("disk result %v, want an error naming the unreadable vm.json", err)
+	}
+}
+
+func TestSecureBootCheckSurvivesABlip(t *testing.T) {
+	f := &restoreXAPI{dropSBOnce: true}
+	p := restoreExporter(t, f)
+
+	if err := p.createVM(context.Background(), sbVM, sbDisks, true); err != nil {
+		t.Fatalf("createVM = %v: one dropped read failed a complete restore", err)
+	}
+	if len(f.destroyed) != 0 {
+		t.Fatalf("destroyed %v after one dropped read", f.destroyed)
 	}
 }

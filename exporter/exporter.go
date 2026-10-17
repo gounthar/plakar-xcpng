@@ -445,7 +445,7 @@ func (p *Exporter) checkSecureBoot(ctx context.Context, vmRef, name string) erro
 	// db, which changes what the guest measures into PCR7, so a key sealed in a restored
 	// vTPM (BitLocker) would no longer unseal. A restore keeps the keys it saved.
 	var certState string
-	err := p.client.Call(ctx, &certState, "VM.get_secureboot_certificates_state", vmRef)
+	err := p.callRetry(ctx, &certState, "VM.get_secureboot_certificates_state", vmRef)
 	switch {
 	case xapi.IsCode(err, "MESSAGE_METHOD_UNKNOWN"):
 		// Older XAPI: no certificate updates, nothing to undo.
@@ -454,14 +454,14 @@ func (p *Exporter) checkSecureBoot(ctx context.Context, vmRef, name string) erro
 	case certState == "update_on_boot" && p.opts.keepSBUpdate:
 		warnf("VM %q: the target pool will replace its Secure Boot keys at next boot (keep_secureboot_update=true); a key sealed to its vTPM may not unseal", name)
 	case certState == "update_on_boot":
-		if err := p.client.Call(ctx, nil, "VM.update_secureboot_certificates_on_boot", vmRef, false); err != nil {
+		if err := p.callRetry(ctx, nil, "VM.update_secureboot_certificates_on_boot", vmRef, false); err != nil {
 			return fmt.Errorf("VM %q: clearing the Secure Boot key update: %w", name, err)
 		}
 		warnf("VM %q keeps its 2011 Secure Boot certificates, which expire in 2026: the target pool's update to the 2023 ones was cleared to protect a key sealed to its vTPM; set keep_secureboot_update=true to keep the update", name)
 	}
 
 	var readiness string
-	err = p.client.Call(ctx, &readiness, "VM.get_secureboot_readiness", vmRef)
+	err = p.callRetry(ctx, &readiness, "VM.get_secureboot_readiness", vmRef)
 	if xapi.IsCode(err, "MESSAGE_METHOD_UNKNOWN") {
 		return nil
 	}
@@ -488,6 +488,15 @@ func (p *Exporter) checkSecureBoot(ctx context.Context, vmRef, name string) erro
 	return nil
 }
 
+// callRetry makes a call of the Secure Boot steps, retried while xapi does not answer.
+// Their failure destroys a VM whose disks may have taken hours to copy, so a dropped
+// connection must not count as one. Each call reads or sets a value, so a retry is safe.
+func (p *Exporter) callRetry(ctx context.Context, out any, method string, args ...any) error {
+	return p.retry(ctx, cleanupRetry, func(ctx context.Context, _ int) error {
+		return p.client.Call(ctx, out, method, args...)
+	})
+}
+
 // heldError is a VM restored in full but held back from starting: unlike any other
 // error after VM.create, it keeps the VM and its disks.
 type heldError struct{ error }
@@ -504,14 +513,14 @@ func (p *Exporter) destroyVM(ctx context.Context, vmRef string) error {
 // Boot keys, or returns "" if it can.
 func (p *Exporter) poolSecureBootGap(ctx context.Context) (string, error) {
 	var pools []string
-	if err := p.client.Call(ctx, &pools, "pool.get_all"); err != nil {
+	if err := p.callRetry(ctx, &pools, "pool.get_all"); err != nil {
 		return "", err
 	}
 	if len(pools) != 1 {
 		return "", fmt.Errorf("expected one pool, found %d", len(pools))
 	}
 	var readiness string
-	if err := p.client.Call(ctx, &readiness, "pool.get_guest_secureboot_readiness", pools[0]); err != nil {
+	if err := p.callRetry(ctx, &readiness, "pool.get_guest_secureboot_readiness", pools[0]); err != nil {
 		return "", err
 	}
 	if readiness == "not_ready" {
@@ -520,13 +529,13 @@ func (p *Exporter) poolSecureBootGap(ctx context.Context) (string, error) {
 
 	// The readiness above is read on the pool master only; the VM may start on any host.
 	var hosts []string
-	if err := p.client.Call(ctx, &hosts, "host.get_all"); err != nil {
+	if err := p.callRetry(ctx, &hosts, "host.get_all"); err != nil {
 		return "", err
 	}
 	var first map[string]string
 	for i, h := range hosts {
 		var field string
-		if err := p.client.Call(ctx, &field, "host.get_uefi_certificates", h); err != nil {
+		if err := p.callRetry(ctx, &field, "host.get_uefi_certificates", h); err != nil {
 			return "", err
 		}
 		certs, err := xapi.ParseUEFICertificates(field)

@@ -314,9 +314,11 @@ VM, and before starting it, the exporter:
     but not started, and its `vm.json` result is an error saying why. There is no option to start it anyway: installing the pool certificates
     and starting it is the fix, and nothing is lost by waiting.
 
-Any other error in these steps (a call that gets no answer, a clearing that fails) fails
-the VM's restore and destroys the VM and its disks: a VM whose Secure Boot state was not
-checked is not a restored VM.
+Each call in these steps is retried for up to 3 minutes while xapi does not answer, so a
+dropped connection does not throw away disks that may have taken hours to copy. Any other
+error (a call still unanswered after that, a clearing xapi refuses) fails the VM's restore
+and destroys the VM and its disks: a VM whose Secure Boot state was not checked is not a
+restored VM.
 
 A restore never turns Secure Boot off: that would silently weaken a control the owner
 enabled, and it changes PCR7 too.
