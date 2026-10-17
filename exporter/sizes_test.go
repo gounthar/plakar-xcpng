@@ -20,13 +20,16 @@ import (
 // destroyRecorder accepts login, VDI.destroy, VDI.resize, the task calls of an import
 // and chunked imports, and records which VDIs were destroyed, which were resized, as
 // "ref size", and the chunks written, as "ref offset" and the data. VDI.resize fails if
-// failResize.
+// failResize. VM.create answers vmRef, or fails if vmRef is empty; VM.destroy is recorded
+// in vmDestroyed. VBD.create is unknown, so attaching a disk fails.
 type destroyRecorder struct {
-	mu         sync.Mutex
-	destroyed  []string
-	resized    []string
-	written    map[string][]byte
-	failResize bool
+	mu          sync.Mutex
+	destroyed   []string
+	resized     []string
+	written     map[string][]byte
+	failResize  bool
+	vmRef       string
+	vmDestroyed []string
 }
 
 // recordImport answers a chunked import_raw_vdi with 200 and records its chunks.
@@ -105,6 +108,23 @@ func (f *destroyRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.resized = append(f.resized, ref+" "+string(req.Params[2]))
 		f.mu.Unlock()
+		result = ""
+	case "VM.create":
+		if f.vmRef == "" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{"code": 1, "message": "INTERNAL_ERROR", "data": []string{}},
+			})
+			return
+		}
+		result = f.vmRef
+	case "VM.destroy":
+		var ref string
+		_ = json.Unmarshal(req.Params[1], &ref)
+		f.mu.Lock()
+		f.vmDestroyed = append(f.vmDestroyed, ref)
+		f.mu.Unlock()
+		result = ""
+	case "VDI.set_name_label", "VDI.set_name_description":
 		result = ""
 	default:
 		_ = json.NewEncoder(w).Encode(map[string]any{

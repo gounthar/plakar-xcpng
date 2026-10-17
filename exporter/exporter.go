@@ -300,16 +300,18 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 		delete(oc, "mac_seed")
 	}
 
+	// A VM that is not made leaves its restored disks with no owner, so they go too.
 	var vmRef string
 	if err := p.client.Call(ctx, &vmRef, "VM.create", rec); err != nil {
-		return err
+		return errors.Join(err, p.destroyDisks(ctx, vm, restored))
 	}
 
 	if err := p.attach(ctx, vmRef, vm, restored); err != nil {
+		// VM.destroy removes the VM's VBDs but not their VDIs (xapi_vm_helpers.ml, destroy).
 		if derr := p.client.Call(context.WithoutCancel(ctx), nil, "VM.destroy", vmRef); derr != nil {
 			err = errors.Join(err, derr)
 		}
-		return err
+		return errors.Join(err, p.destroyDisks(ctx, vm, restored))
 	}
 
 	// XAPI copies never carry a unique vTPM's state; a restore does, by design.
@@ -485,6 +487,14 @@ func (p *Exporter) checkDiskSizes(ctx context.Context, vm pendingVM, restored ma
 	if len(errs) == 0 {
 		return nil
 	}
+	return errors.Join(append(errs, p.destroyDisks(ctx, vm, restored))...)
+}
+
+// destroyDisks destroys every disk restored for a VM that is not restored, even when
+// ctx is done: an interrupted restore must not leave them behind either.
+func (p *Exporter) destroyDisks(ctx context.Context, vm pendingVM, restored map[string]restoredDisk) error {
+	ctx = context.WithoutCancel(ctx)
+	var errs []error
 	for _, d := range vm.meta.Disks {
 		disk, ok := restored[vm.dir+"/"+d.VDIUUID]
 		if !ok {
