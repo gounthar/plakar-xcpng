@@ -253,6 +253,11 @@ func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, n
 		}
 		return restoredDisk{}, err
 	}
+	// The label was needed only while the create had not answered. A disk restored
+	// without its vm.json is never attached, so it is named after its file here.
+	if err := p.client.Call(ctx, nil, "VDI.set_name_label", ref, name); err != nil {
+		warnf("disk %s: restored as VDI %q, renaming it failed: %s", name, label, err)
+	}
 
 	if sparse {
 		_, err = p.client.ImportSparseVDI(ctx, ref, size, r)

@@ -172,7 +172,9 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result = "OpaqueRef:sr"
 	case "VDI.destroy", "VM.destroy":
 		f.destroyed = append(f.destroyed, str(1))
-	case "VDI.set_name_label", "VDI.set_name_description", "VBD.create":
+	case "VDI.set_name_label":
+		f.vdiLabels[str(1)] = str(2)
+	case "VDI.set_name_description", "VBD.create":
 	case "VM.create":
 		var rec struct {
 			OtherConfig map[string]string `json:"other_config"`
@@ -324,4 +326,17 @@ func TestInterruptBeforeVMsDestroysTheirDisks(t *testing.T) {
 		t.Fatal("VM reported restored after the interrupt")
 	}
 	wantDisksDestroyed(t, f)
+}
+
+func TestRestoredDiskKeepsItsFileName(t *testing.T) {
+	f := &restoreXAPI{}
+	p := restoreExporter(t, f)
+
+	if _, err := p.restoreDisk(context.Background(), "OpaqueRef:sr", false, "disk-0", diskRecord(make([]byte, 4096))); err != nil {
+		t.Fatal(err)
+	}
+	// A disk restored without its vm.json is never attached, so never renamed there.
+	if l := f.vdiLabels["OpaqueRef:vdi0"]; l != "disk-0" {
+		t.Fatalf("restored VDI labelled %q, want its file name disk-0", l)
+	}
 }
