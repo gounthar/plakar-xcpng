@@ -97,6 +97,13 @@ type restoreXAPI struct {
 	// VM's Secure Boot readiness, on a pool whose own readiness is not_ready.
 	dropSB      bool
 	sbReadiness string
+	// sessionLossOnce fails the first SR.get_current_operations with SESSION_INVALID,
+	// as after a toolstack restart; hangOnce never answers the first one. refuseVM
+	// fails VM.create with a xapi error.
+	sessionLossOnce bool
+	hangOnce        bool
+	refuseVM        bool
+	logins          int
 }
 
 func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -127,11 +134,22 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_ = conn.Close()
 		}
 	}
+	if req.Method == "SR.get_current_operations" {
+		f.mu.Lock()
+		hang := f.hangOnce
+		f.hangOnce = false
+		f.mu.Unlock()
+		if hang {
+			<-r.Context().Done()
+			return
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var result any = ""
 	switch req.Method {
 	case "session.login_with_password":
+		f.logins++
 		result = "OpaqueRef:session"
 	case "task.create":
 		result = "OpaqueRef:task"
@@ -158,6 +176,11 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		result = ref
 	case "SR.get_current_operations":
+		if f.sessionLossOnce {
+			f.sessionLossOnce = false
+			xapiErr("SESSION_INVALID")
+			return
+		}
 		f.srOpsReads++
 		ops := map[string]string{}
 		if f.srOpsReads <= f.busyLooks {
@@ -184,6 +207,10 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.vdiLabels[str(1)] = str(2)
 	case "VDI.set_name_description", "VBD.create":
 	case "VM.create":
+		if f.refuseVM {
+			xapiErr("INTERNAL_ERROR")
+			return
+		}
 		var rec struct {
 			OtherConfig map[string]string `json:"other_config"`
 		}
@@ -428,5 +455,139 @@ func TestDiskWithoutVMIsDestroyed(t *testing.T) {
 	}
 	if !slices.Equal(f.destroyed, []string{"OpaqueRef:vdi0"}) {
 		t.Fatalf("destroyed %v, want OpaqueRef:vdi0", f.destroyed)
+	}
+}
+
+func TestVDILookupSurvivesXAPIRestart(t *testing.T) {
+	f := &restoreXAPI{dropVDI: true, sessionLossOnce: true}
+	p := restoreExporter(t, f)
+
+	if _, err := p.restoreDisk(context.Background(), "OpaqueRef:sr", false, "disk-0", diskRecord(make([]byte, 4096))); err == nil {
+		t.Fatal("restoreDisk succeeded although VDI.create never answered")
+	}
+	if f.logins < 2 {
+		t.Fatalf("%d logins: the lost session was not renewed", f.logins)
+	}
+	if !slices.Equal(f.destroyed, []string{"OpaqueRef:vdi0"}) {
+		t.Fatalf("destroyed %v, want OpaqueRef:vdi0", f.destroyed)
+	}
+}
+
+func TestVDILookupOutlivesAHungCall(t *testing.T) {
+	old := attemptTimeout
+	attemptTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { attemptTimeout = old })
+	f := &restoreXAPI{dropVDI: true, hangOnce: true}
+	p := restoreExporter(t, f)
+
+	if _, err := p.restoreDisk(context.Background(), "OpaqueRef:sr", false, "disk-0", diskRecord(make([]byte, 4096))); err == nil {
+		t.Fatal("restoreDisk succeeded although VDI.create never answered")
+	}
+	if !slices.Equal(f.destroyed, []string{"OpaqueRef:vdi0"}) {
+		t.Fatalf("destroyed %v, want OpaqueRef:vdi0", f.destroyed)
+	}
+}
+
+func TestBusySRStillLooksForTheVDI(t *testing.T) {
+	old := restoreWait
+	restoreWait = 30 * time.Millisecond
+	t.Cleanup(func() { restoreWait = old })
+	f := &restoreXAPI{dropVDI: true, busyLooks: 1 << 30} // another client's vdi_create never ends
+	p := restoreExporter(t, f)
+
+	_, err := p.restoreDisk(context.Background(), "OpaqueRef:sr", false, "disk-0", diskRecord(make([]byte, 4096)))
+	if err == nil || strings.Contains(err.Error(), "left behind") {
+		t.Fatalf("restoreDisk = %v, want the create error alone: the VDI was found and destroyed", err)
+	}
+	if !slices.Equal(f.destroyed, []string{"OpaqueRef:vdi0"}) {
+		t.Fatalf("destroyed %v, want OpaqueRef:vdi0", f.destroyed)
+	}
+}
+
+// exportRecords runs Export on the given records and returns the results by pathname.
+func exportRecords(t *testing.T, p *Exporter, recs ...*connectors.Record) map[string]error {
+	t.Helper()
+	records := make(chan *connectors.Record, len(recs))
+	for _, r := range recs {
+		records <- r
+	}
+	close(records)
+	results := make(chan *connectors.Result, len(recs)+1)
+	if err := p.Export(context.Background(), records, results); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]error{}
+	for r := range results {
+		got[r.Record.Pathname] = r.Err
+	}
+	return got
+}
+
+func metaRecord(t *testing.T, dir string, raw []byte) *connectors.Record {
+	t.Helper()
+	return &connectors.Record{
+		Pathname: dir + "/" + xapi.MetaFilename,
+		FileInfo: objects.FileInfo{Lsize: int64(len(raw)), Lmode: 0o644},
+		Reader:   io.NopCloser(bytes.NewReader(raw)),
+	}
+}
+
+func vmJSON(t *testing.T, uuids ...string) []byte {
+	t.Helper()
+	meta := xapi.VMMeta{Version: xapi.MetaVersion, VM: map[string]any{"name_label": "web"}}
+	for _, u := range uuids {
+		meta.Disks = append(meta.Disks, xapi.DiskMeta{File: xapi.DiskFilename("0", u), VDIUUID: u, VirtualSize: 4096, Userdevice: "0"})
+	}
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func diskIn(dir, uuid string) *connectors.Record {
+	r := diskRecord(make([]byte, 4096))
+	r.Pathname = dir + "/" + xapi.DiskFilename("0", uuid)
+	r.FileInfo.Lmode = 0o644
+	return r
+}
+
+func TestDiskNotInVMJSONIsDestroyed(t *testing.T) {
+	f := &restoreXAPI{}
+	p := restoreExporter(t, f)
+	p.opts.srUUID = "sr-uuid"
+
+	got := exportRecords(t, p, diskIn("/vm", "a"), diskIn("/vm", "extra"), metaRecord(t, "/vm", vmJSON(t, "a")))
+	if err := got["/vm/"+xapi.DiskFilename("0", "extra")]; err == nil {
+		t.Fatal("a disk vm.json does not list was reported restored")
+	}
+	if err := got["/vm/"+xapi.DiskFilename("0", "a")]; err != nil {
+		t.Fatalf("the VM's own disk failed: %v", err)
+	}
+	if !slices.Contains(f.destroyed, "OpaqueRef:vdi1") || slices.Contains(f.destroyed, "OpaqueRef:vdi0") {
+		t.Fatalf("destroyed %v, want OpaqueRef:vdi1 (the extra disk) only", f.destroyed)
+	}
+}
+
+func TestDisksOfAFailedVMAreReportedFailed(t *testing.T) {
+	f := &restoreXAPI{refuseVM: true}
+	p := restoreExporter(t, f)
+	p.opts.srUUID = "sr-uuid"
+
+	got := exportRecords(t, p, diskIn("/vm", "a"), metaRecord(t, "/vm", vmJSON(t, "a")))
+	if err := got["/vm/"+xapi.DiskFilename("0", "a")]; err == nil {
+		t.Fatal("the disk of a VM that was not restored was reported restored")
+	}
+}
+
+func TestDiskBesideUnreadableVMJSONSaysSo(t *testing.T) {
+	f := &restoreXAPI{}
+	p := restoreExporter(t, f)
+	p.opts.srUUID = "sr-uuid"
+
+	got := exportRecords(t, p, diskIn("/vm", "a"), metaRecord(t, "/vm", []byte("{not json")))
+	err := got["/vm/"+xapi.DiskFilename("0", "a")]
+	if err == nil || strings.Contains(err.Error(), "no vm.json") {
+		t.Fatalf("disk result %v, want an error naming the unreadable vm.json", err)
 	}
 }

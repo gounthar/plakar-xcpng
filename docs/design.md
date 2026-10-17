@@ -247,10 +247,12 @@ Nothing guarantees that `vm.json` arrives before the disks, so:
    `vm.json` is read, after the disk is written, so the removed bytes are kept: when
    the stored size equals the recorded `virtual_size`, they are written back, as
    stored, into the VDI in one chunk of the chunked import.
-4. Send the results at the end, once it is known which disks have a VM: a `.raw` whose
-   directory holds no `vm.json` (a restore of the disk file alone) has its VDI destroyed
-   and its result is an error, since the restore makes VMs, not loose disks. A failed
-   `.raw` is reported as it fails.
+4. Send the results at the end, once it is known which disks have a VM. A `.raw` that
+   no `vm.json` lists (a restore of the disk file alone, a file beside a `vm.json` that
+   does not name it, or one beside a `vm.json` that could not be read) has its VDI
+   destroyed and its result is an error, since the restore makes VMs, not loose disks.
+   The disks of a VM that was not restored report that too. A failed `.raw` is reported
+   as it fails.
 
 A restore that fails partway removes what it made. A VM that cannot be made, attached
 or checked for Secure Boot is destroyed with its restored VDIs (`VM.destroy` removes the
@@ -261,7 +263,10 @@ create answers, a `plakar_restore` key in the VM's `other_config` until the VM i
 After an error that is not xapi's own, the exporter waits until the SR shows no
 `vdi_create` (`VDI.create` holds it until the VDI's record exists), or looks for the VM
 again for up to 2 minutes (xapi shows no operation while it creates one), and destroys
-what carries the label. Measured on XCP-ng 8.3.0 (xapi-core 26.1.19): a `VDI.create` cut at 50 to 200 ms was
+what carries the label. On a busy SR, where other clients keep `vdi_create` running,
+the VDI is looked for anyway once the wait runs out. Every cleanup call is retried
+for up to 3 minutes while xapi does not answer, with a new session after a toolstack
+restart, and each attempt has its own one-minute bound. Measured on XCP-ng 8.3.0 (xapi-core 26.1.19): a `VDI.create` cut at 50 to 200 ms was
 finished by xapi each time and found; a `VM.create` cut at 1 ms was found within 20 ms.
 Not covered: xapi stopping between the SM's create and the VDI's record (an `SR.scan`
 brings the volume back), a plugin killed mid-restore, and a cleanup call that itself
