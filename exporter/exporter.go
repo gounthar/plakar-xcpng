@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/PlakarKorp/kloset/connectors"
@@ -122,23 +123,30 @@ func (p *Exporter) Export(ctx context.Context, records <-chan *connectors.Record
 
 	restored := make(map[string]restoredDisk) // dir + "/" + original VDI UUID -> new VDI
 	var vms []pendingVM
+	var disks []doneDisk              // restored, reported once their VM's fate is known
+	badMeta := make(map[string]error) // dir -> why its vm.json gave no VM to make
 
 	for record := range records {
 		if record.Err != nil || record.IsXattr || !record.FileInfo.Lmode.IsRegular() {
 			results <- record.Ok()
 			continue
 		}
-		if err := ctx.Err(); err != nil {
-			results <- record.Error(err)
-			continue
-		}
 
 		dir, base := path.Split(record.Pathname)
 		dir = path.Clean(dir)
 
+		if err := ctx.Err(); err != nil {
+			if base == xapi.MetaFilename {
+				badMeta[dir] = err
+			}
+			results <- record.Error(err)
+			continue
+		}
+
 		if base == xapi.MetaFilename {
 			meta, err := readMeta(record)
 			if err != nil {
+				badMeta[dir] = err
 				results <- result(record, err)
 				continue
 			}
@@ -157,20 +165,80 @@ func (p *Exporter) Export(ctx context.Context, records <-chan *connectors.Record
 		}
 
 		disk, err := p.restoreDisk(ctx, srRef, sparse, base, record)
-		if err == nil {
-			restored[dir+"/"+vdiUUID] = disk
-		}
-		results <- record.Error(err) // Error(nil) closes the reader and reports success
-	}
-
-	for _, vm := range vms {
-		if err := ctx.Err(); err != nil {
-			results <- result(vm.record, err)
+		if err != nil {
+			results <- record.Error(err) // closes the reader
 			continue
 		}
-		results <- result(vm.record, p.createVM(ctx, vm, restored, sparse))
+		key := dir + "/" + vdiUUID
+		restored[key] = disk
+		// The next record comes only once this reader is closed (go-kloset-sdk,
+		// receiveRecords), so it is closed now and the result sent later.
+		_ = record.Close()
+		record.Reader = nil
+		disks = append(disks, doneDisk{record: record, key: key, dir: dir, ref: disk.ref})
+	}
+
+	failed := p.createVMs(ctx, vms, restored, sparse, results)
+	owned := make(map[string]bool) // disks some vm.json lists
+	for _, vm := range vms {
+		for _, d := range vm.meta.Disks {
+			owned[vm.dir+"/"+d.VDIUUID] = true
+		}
+	}
+
+	// A disk is restored as part of its VM. One that no vm.json lists would be left
+	// with no VM, so it goes; one whose VM failed is already gone with it. No path in
+	// the messages: plakar prefixes every record error with it.
+	for _, d := range disks {
+		var err error
+		switch {
+		case owned[d.key] && failed[d.dir]:
+			err = fmt.Errorf("its VM was not restored, see %s; the disk's VDI was destroyed with it", xapi.MetaFilename)
+		case owned[d.key]:
+		case badMeta[d.dir] != nil:
+			err = fmt.Errorf("the %s beside this disk gave no VM to attach it to (%v): its VDI was destroyed", xapi.MetaFilename, badMeta[d.dir])
+		case slices.ContainsFunc(vms, func(vm pendingVM) bool { return vm.dir == d.dir }):
+			err = fmt.Errorf("the %s beside this disk does not list it: its VDI was destroyed", xapi.MetaFilename)
+		default:
+			err = fmt.Errorf("no %s in the restore for this disk, so no VM to attach it to: its VDI was destroyed", xapi.MetaFilename)
+		}
+		if err != nil && !owned[d.key] {
+			if derr := p.destroyRef(ctx, "VDI.destroy", d.ref); derr != nil {
+				err = fmt.Errorf("%w; destroying VDI %s failed: %w", err, d.ref, derr)
+			}
+		}
+		results <- result(d.record, err)
 	}
 	return nil
+}
+
+type doneDisk struct {
+	record *connectors.Record
+	key    string // dir + "/" + original VDI UUID
+	dir    string
+	ref    string
+}
+
+// createVMs makes each VM from its vm.json and returns the directories of the VMs
+// not restored. A VM the restore stops before has its restored disks destroyed, as
+// when making it fails: they would have no owner. A VM held back from starting is
+// restored, with its disks.
+func (p *Exporter) createVMs(ctx context.Context, vms []pendingVM, restored map[string]restoredDisk, zeroed bool, results chan<- *connectors.Result) map[string]bool {
+	failed := make(map[string]bool)
+	for _, vm := range vms {
+		err := ctx.Err()
+		if err != nil {
+			err = errors.Join(err, p.destroyDisks(ctx, vm, restored))
+		} else {
+			err = p.createVM(ctx, vm, restored, zeroed)
+		}
+		var held *heldError
+		if err != nil && !errors.As(err, &held) {
+			failed[vm.dir] = true
+		}
+		results <- result(vm.record, err)
+	}
+	return failed
 }
 
 func (p *Exporter) targetSR(ctx context.Context) (string, error) {
@@ -224,10 +292,15 @@ func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, n
 		tail = newShortTail(r, size)
 		r, size = tail, tail.limit
 	}
+	// Interrupted already: the create must not be sent, then searched for at length.
+	if err := ctx.Err(); err != nil {
+		return restoredDisk{}, err
+	}
 	var ref string
+	label := restoreLabel()
 	err := p.client.Call(ctx, &ref, "VDI.create", map[string]any{
-		"name_label":       name,
-		"name_description": "restored by plakar",
+		"name_label":       label,
+		"name_description": "restored by plakar from " + name,
 		"SR":               srRef,
 		"virtual_size":     size,
 		"type":             "user",
@@ -239,7 +312,18 @@ func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, n
 		"tags":             []string{},
 	})
 	if err != nil {
+		if mayHaveRun(err) {
+			if cerr := p.destroyLabelledVDI(context.WithoutCancel(ctx), srRef, label); cerr != nil {
+				err = errors.Join(err, fmt.Errorf("disk %s may be left behind as VDI %q: %w", name, label, cerr))
+			}
+		}
 		return restoredDisk{}, err
+	}
+	// The label was needed only while the create had not answered. attach gives the
+	// disk its original name; until then, and if a destroy later fails or the plugin is
+	// killed, the file name says more than the label.
+	if err := p.client.Call(ctx, nil, "VDI.set_name_label", ref, name); err != nil {
+		warnf("disk %s: restored as VDI %q, renaming it failed: %s", name, label, err)
 	}
 
 	if sparse {
@@ -295,21 +379,37 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 		rec["tags"] = t
 	}
 	rec["affinity"] = xapi.NullRef
-	if oc, ok := rec["other_config"].(map[string]any); ok && !p.opts.keepMAC {
+	oc := map[string]any{}
+	if m, ok := src["other_config"].(map[string]any); ok {
+		maps.Copy(oc, m)
+	}
+	if !p.opts.keepMAC {
 		// A copy beside the original must not derive the same MAC addresses.
 		delete(oc, "mac_seed")
 	}
+	label := restoreLabel()
+	oc[restoreMarkerKey] = label
+	rec["other_config"] = oc
 
+	// A VM that is not made leaves its restored disks with no owner, so they go too.
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, p.destroyDisks(ctx, vm, restored))
+	}
 	var vmRef string
 	if err := p.client.Call(ctx, &vmRef, "VM.create", rec); err != nil {
-		return err
+		if mayHaveRun(err) {
+			if cerr := p.destroyMarkedVM(context.WithoutCancel(ctx), rec["name_label"].(string), label); cerr != nil {
+				err = errors.Join(err, fmt.Errorf("VM %q may be left behind, marked other_config:%s=%s: %w", rec["name_label"], restoreMarkerKey, label, cerr))
+			}
+		}
+		return errors.Join(err, p.destroyDisks(ctx, vm, restored))
 	}
 
 	if err := p.attach(ctx, vmRef, vm, restored); err != nil {
-		if derr := p.client.Call(context.WithoutCancel(ctx), nil, "VM.destroy", vmRef); derr != nil {
-			err = errors.Join(err, derr)
-		}
-		return err
+		return errors.Join(err, p.destroyVM(ctx, vmRef), p.destroyDisks(ctx, vm, restored))
+	}
+	if err := p.client.Call(ctx, nil, "VM.remove_from_other_config", vmRef, restoreMarkerKey); err != nil {
+		warnf("VM %q: removing other_config:%s: %s", name, restoreMarkerKey, err)
 	}
 
 	// XAPI copies never carry a unique vTPM's state; a restore does, by design.
@@ -322,11 +422,19 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 	// Only the target pool can change a restored VM's Secure Boot state, so only a gap in
 	// the pool holds the VM back; it is restored halted and the pool can be fixed first.
 	if err := p.checkSecureBoot(ctx, vmRef, name); err != nil {
-		return err
+		var held *heldError
+		if errors.As(err, &held) {
+			return err
+		}
+		// A VM whose Secure Boot state was not checked is not restored.
+		return errors.Join(err, p.destroyVM(ctx, vmRef), p.destroyDisks(ctx, vm, restored))
 	}
 
 	if p.opts.startOnRestore {
-		return p.client.Call(ctx, nil, "VM.start", vmRef, false, false)
+		if err := p.client.Call(ctx, nil, "VM.start", vmRef, false, false); err != nil {
+			// The VM is complete, only not running: it and its disks are kept.
+			return &heldError{fmt.Errorf("VM %q restored but not started: %w", name, err)}
+		}
 	}
 	return nil
 }
@@ -340,7 +448,7 @@ func (p *Exporter) checkSecureBoot(ctx context.Context, vmRef, name string) erro
 	// db, which changes what the guest measures into PCR7, so a key sealed in a restored
 	// vTPM (BitLocker) would no longer unseal. A restore keeps the keys it saved.
 	var certState string
-	err := p.client.Call(ctx, &certState, "VM.get_secureboot_certificates_state", vmRef)
+	err := p.callRetry(ctx, &certState, "VM.get_secureboot_certificates_state", vmRef)
 	switch {
 	case xapi.IsCode(err, "MESSAGE_METHOD_UNKNOWN"):
 		// Older XAPI: no certificate updates, nothing to undo.
@@ -349,14 +457,14 @@ func (p *Exporter) checkSecureBoot(ctx context.Context, vmRef, name string) erro
 	case certState == "update_on_boot" && p.opts.keepSBUpdate:
 		warnf("VM %q: the target pool will replace its Secure Boot keys at next boot (keep_secureboot_update=true); a key sealed to its vTPM may not unseal", name)
 	case certState == "update_on_boot":
-		if err := p.client.Call(ctx, nil, "VM.update_secureboot_certificates_on_boot", vmRef, false); err != nil {
+		if err := p.callRetry(ctx, nil, "VM.update_secureboot_certificates_on_boot", vmRef, false); err != nil {
 			return fmt.Errorf("VM %q: clearing the Secure Boot key update: %w", name, err)
 		}
 		warnf("VM %q keeps its 2011 Secure Boot certificates, which expire in 2026: the target pool's update to the 2023 ones was cleared to protect a key sealed to its vTPM; set keep_secureboot_update=true to keep the update", name)
 	}
 
 	var readiness string
-	err = p.client.Call(ctx, &readiness, "VM.get_secureboot_readiness", vmRef)
+	err = p.callRetry(ctx, &readiness, "VM.get_secureboot_readiness", vmRef)
 	if xapi.IsCode(err, "MESSAGE_METHOD_UNKNOWN") {
 		return nil
 	}
@@ -377,24 +485,46 @@ func (p *Exporter) checkSecureBoot(ctx context.Context, vmRef, name string) erro
 		if reason, err := p.poolSecureBootGap(ctx); err != nil {
 			return err
 		} else if reason != "" {
-			return fmt.Errorf("VM %q restored but not started: it has never booted, so it takes its Secure Boot keys from the pool at first boot, and %s. Install the pool's Secure Boot certificates, then start it", name, reason)
+			return &heldError{fmt.Errorf("VM %q restored but not started: it has never booted, so it takes its Secure Boot keys from the pool at first boot, and %s. Install the pool's Secure Boot certificates, then start it", name, reason)}
 		}
 	}
 	return nil
+}
+
+// callRetry makes a call of the Secure Boot steps, retried while xapi does not answer.
+// Their failure destroys a VM whose disks may have taken hours to copy, so a dropped
+// connection must not count as one. Each call reads or sets a value, so a retry is safe.
+func (p *Exporter) callRetry(ctx context.Context, out any, method string, args ...any) error {
+	return p.retry(ctx, cleanupRetry, func(ctx context.Context, _ int) error {
+		return p.client.Call(ctx, out, method, args...)
+	})
+}
+
+// heldError is a VM restored in full but not started, held back for Secure Boot or
+// failing VM.start: unlike any other error after VM.create, it keeps the VM and its
+// disks, and their results report them restored.
+type heldError struct{ error }
+
+func (e *heldError) Unwrap() error { return e.error }
+
+// destroyVM destroys a VM the restore made, even when ctx is done. VM.destroy
+// removes the VM's VBDs but not their VDIs (xapi_vm_helpers.ml, destroy).
+func (p *Exporter) destroyVM(ctx context.Context, vmRef string) error {
+	return p.destroyRef(ctx, "VM.destroy", vmRef)
 }
 
 // poolSecureBootGap says why the target pool cannot give a first-booting VM its Secure
 // Boot keys, or returns "" if it can.
 func (p *Exporter) poolSecureBootGap(ctx context.Context) (string, error) {
 	var pools []string
-	if err := p.client.Call(ctx, &pools, "pool.get_all"); err != nil {
+	if err := p.callRetry(ctx, &pools, "pool.get_all"); err != nil {
 		return "", err
 	}
 	if len(pools) != 1 {
 		return "", fmt.Errorf("expected one pool, found %d", len(pools))
 	}
 	var readiness string
-	if err := p.client.Call(ctx, &readiness, "pool.get_guest_secureboot_readiness", pools[0]); err != nil {
+	if err := p.callRetry(ctx, &readiness, "pool.get_guest_secureboot_readiness", pools[0]); err != nil {
 		return "", err
 	}
 	if readiness == "not_ready" {
@@ -403,13 +533,13 @@ func (p *Exporter) poolSecureBootGap(ctx context.Context) (string, error) {
 
 	// The readiness above is read on the pool master only; the VM may start on any host.
 	var hosts []string
-	if err := p.client.Call(ctx, &hosts, "host.get_all"); err != nil {
+	if err := p.callRetry(ctx, &hosts, "host.get_all"); err != nil {
 		return "", err
 	}
 	var first map[string]string
 	for i, h := range hosts {
 		var field string
-		if err := p.client.Call(ctx, &field, "host.get_uefi_certificates", h); err != nil {
+		if err := p.callRetry(ctx, &field, "host.get_uefi_certificates", h); err != nil {
 			return "", err
 		}
 		certs, err := xapi.ParseUEFICertificates(field)
@@ -485,12 +615,19 @@ func (p *Exporter) checkDiskSizes(ctx context.Context, vm pendingVM, restored ma
 	if len(errs) == 0 {
 		return nil
 	}
+	return errors.Join(append(errs, p.destroyDisks(ctx, vm, restored))...)
+}
+
+// destroyDisks destroys every disk restored for a VM that is not restored, even when
+// ctx is done: an interrupted restore must not leave them behind either.
+func (p *Exporter) destroyDisks(ctx context.Context, vm pendingVM, restored map[string]restoredDisk) error {
+	var errs []error
 	for _, d := range vm.meta.Disks {
 		disk, ok := restored[vm.dir+"/"+d.VDIUUID]
 		if !ok {
 			continue
 		}
-		if err := p.client.Call(ctx, nil, "VDI.destroy", disk.ref); err != nil {
+		if err := p.destroyRef(ctx, "VDI.destroy", disk.ref); err != nil {
 			errs = append(errs, fmt.Errorf("destroying restored VDI %s: %w", disk.ref, err))
 		}
 	}
