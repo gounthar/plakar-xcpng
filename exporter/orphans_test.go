@@ -309,3 +309,19 @@ func TestNeverSentCallIsNotLookedFor(t *testing.T) {
 		t.Fatal("neverSent is true for a xapi error")
 	}
 }
+
+func TestInterruptBeforeVMsDestroysTheirDisks(t *testing.T) {
+	f := &destroyRecorder{}
+	p := sizesExporter(t, f, options{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	vm := sizesVM
+	vm.record = &connectors.Record{Pathname: "/vm/vm.json"}
+	results := make(chan *connectors.Result, 1)
+	p.createVMs(ctx, []pendingVM{vm}, orphansDisks, true, results)
+	if res := <-results; res.Err == nil {
+		t.Fatal("VM reported restored after the interrupt")
+	}
+	wantDisksDestroyed(t, f)
+}

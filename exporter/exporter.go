@@ -163,14 +163,20 @@ func (p *Exporter) Export(ctx context.Context, records <-chan *connectors.Record
 		results <- record.Error(err) // Error(nil) closes the reader and reports success
 	}
 
+	p.createVMs(ctx, vms, restored, sparse, results)
+	return nil
+}
+
+// createVMs makes each VM from its vm.json. A VM the restore stops before has its
+// restored disks destroyed, as when making it fails: they would have no owner.
+func (p *Exporter) createVMs(ctx context.Context, vms []pendingVM, restored map[string]restoredDisk, zeroed bool, results chan<- *connectors.Result) {
 	for _, vm := range vms {
 		if err := ctx.Err(); err != nil {
-			results <- result(vm.record, err)
+			results <- result(vm.record, errors.Join(err, p.destroyDisks(ctx, vm, restored)))
 			continue
 		}
-		results <- result(vm.record, p.createVM(ctx, vm, restored, sparse))
+		results <- result(vm.record, p.createVM(ctx, vm, restored, zeroed))
 	}
-	return nil
 }
 
 func (p *Exporter) targetSR(ctx context.Context) (string, error) {
