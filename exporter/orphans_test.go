@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -92,6 +93,10 @@ type restoreXAPI struct {
 	unmarked   []string
 	lookups    int // VDI.get_by_name_label and VM.get_by_name_label calls
 	srOpsReads int
+	// dropSB drops VM.get_secureboot_certificates_state. sbReadiness, when set, is the
+	// VM's Secure Boot readiness, on a pool whose own readiness is not_ready.
+	dropSB      bool
+	sbReadiness string
 }
 
 func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -173,6 +178,9 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "VDI.destroy", "VM.destroy":
 		f.destroyed = append(f.destroyed, str(1))
 	case "VDI.set_name_label":
+		if f.vdiLabels == nil {
+			f.vdiLabels = map[string]string{}
+		}
 		f.vdiLabels[str(1)] = str(2)
 	case "VDI.set_name_description", "VBD.create":
 	case "VM.create":
@@ -201,9 +209,26 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result = map[string]string{restoreMarkerKey: f.vmMarkers[str(1)]}
 	case "VM.remove_from_other_config":
 		f.unmarked = append(f.unmarked, str(1)+" "+str(2))
-	case "VM.get_secureboot_certificates_state", "VM.get_secureboot_readiness":
-		xapiErr("MESSAGE_METHOD_UNKNOWN")
-		return
+	case "VM.get_secureboot_certificates_state":
+		if f.dropSB {
+			drop()
+			return
+		}
+		result = "ok"
+	case "VM.get_secureboot_readiness":
+		if f.sbReadiness == "" {
+			xapiErr("MESSAGE_METHOD_UNKNOWN")
+			return
+		}
+		result = f.sbReadiness
+	case "pool.get_all":
+		result = []string{"OpaqueRef:pool"}
+	case "pool.get_guest_secureboot_readiness":
+		result = "not_ready"
+	case "SR.get_by_uuid":
+		result = "OpaqueRef:sr"
+	case "SR.get_record":
+		result = map[string]any{"type": "lvm", "sm_config": map[string]string{}}
 	default:
 		xapiErr("MESSAGE_METHOD_UNKNOWN")
 		return
@@ -294,18 +319,23 @@ func TestRestoredVMLosesItsMarker(t *testing.T) {
 }
 
 func TestNeverSentCallIsNotLookedFor(t *testing.T) {
-	srv := httptest.NewTLSServer(&restoreXAPI{})
-	c, err := xapi.Dial(context.Background(), &xapi.Config{
-		Host:        strings.TrimPrefix(srv.URL, "https://"),
-		TLSInsecure: true,
-	})
+	// A port nobody listens on: the request cannot leave. A closed httptest server
+	// would not do, since the client may reuse a kept-alive connection and read EOF.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.Close()
-	err = c.Call(context.Background(), nil, "VM.create", map[string]any{})
-	if !neverSent(err) {
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	_, err = http.Post("http://"+addr+"/jsonrpc", "application/json", strings.NewReader("{}"))
+	if err == nil {
+		t.Fatal("POST to a closed port succeeded")
+	}
+	if !neverSent(fmt.Errorf("VM.create: %w", err)) {
 		t.Fatalf("neverSent(%v) = false for a refused connection", err)
+	}
+	if neverSent(fmt.Errorf("VM.create: %w", io.EOF)) {
+		t.Fatal("neverSent is true for a connection that broke after the request")
 	}
 	if neverSent(&xapi.Error{Code: "INTERNAL_ERROR"}) {
 		t.Fatal("neverSent is true for a xapi error")
@@ -338,5 +368,65 @@ func TestRestoredDiskKeepsItsFileName(t *testing.T) {
 	// A disk restored without its vm.json is never attached, so never renamed there.
 	if l := f.vdiLabels["OpaqueRef:vdi0"]; l != "disk-0" {
 		t.Fatalf("restored VDI labelled %q, want its file name disk-0", l)
+	}
+}
+
+var sbVM = pendingVM{dir: "/vm", meta: xapi.VMMeta{
+	VM:    map[string]any{"name_label": "web"},
+	Disks: []xapi.DiskMeta{{File: "disk-0", VDIUUID: "a", VirtualSize: 4096}},
+}}
+
+var sbDisks = map[string]restoredDisk{"/vm/a": {ref: "OpaqueRef:a", size: 4096, kept: 4096}}
+
+func TestSecureBootCheckFailureDestroysVMAndDisks(t *testing.T) {
+	f := &restoreXAPI{dropSB: true}
+	p := restoreExporter(t, f)
+
+	if err := p.createVM(context.Background(), sbVM, sbDisks, true); err == nil {
+		t.Fatal("createVM succeeded although the Secure Boot check got no answer")
+	}
+	// The VM goes first: its VBDs hold the disks.
+	if !slices.Equal(f.destroyed, []string{"OpaqueRef:vm1", "OpaqueRef:a"}) {
+		t.Fatalf("destroyed %v, want OpaqueRef:vm1 then OpaqueRef:a", f.destroyed)
+	}
+}
+
+func TestSecureBootHoldKeepsVM(t *testing.T) {
+	f := &restoreXAPI{sbReadiness: "first_boot"}
+	p := restoreExporter(t, f)
+
+	err := p.createVM(context.Background(), sbVM, sbDisks, true)
+	if err == nil || !strings.Contains(err.Error(), "restored but not started") {
+		t.Fatalf("createVM = %v, want the Secure Boot hold", err)
+	}
+	if len(f.destroyed) != 0 {
+		t.Fatalf("destroyed %v: a VM held back for Secure Boot is restored, not failed", f.destroyed)
+	}
+}
+
+func TestDiskWithoutVMIsDestroyed(t *testing.T) {
+	f := &restoreXAPI{}
+	p := restoreExporter(t, f)
+	p.opts.srUUID = "sr-uuid"
+
+	records := make(chan *connectors.Record, 1)
+	rec := diskRecord(make([]byte, 4096))
+	rec.Pathname = "/vm/" + xapi.DiskFilename("0", "a")
+	rec.FileInfo.Lmode = 0o644
+	records <- rec
+	close(records)
+	results := make(chan *connectors.Result, 4)
+	if err := p.Export(context.Background(), records, results); err != nil {
+		t.Fatal(err)
+	}
+	var got []*connectors.Result
+	for r := range results {
+		got = append(got, r)
+	}
+	if len(got) != 1 || got[0].Err == nil || !strings.Contains(got[0].Err.Error(), "vm.json") {
+		t.Fatalf("results %v, want one error naming the missing vm.json", got)
+	}
+	if !slices.Equal(f.destroyed, []string{"OpaqueRef:vdi0"}) {
+		t.Fatalf("destroyed %v, want OpaqueRef:vdi0", f.destroyed)
 	}
 }

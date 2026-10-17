@@ -247,7 +247,26 @@ Nothing guarantees that `vm.json` arrives before the disks, so:
    `vm.json` is read, after the disk is written, so the removed bytes are kept: when
    the stored size equals the recorded `virtual_size`, they are written back, as
    stored, into the VDI in one chunk of the chunked import.
-4. Send the results: per `.raw` as it completes, per `vm.json` at the end.
+4. Send the results at the end, once it is known which disks have a VM: a `.raw` whose
+   directory holds no `vm.json` (a restore of the disk file alone) has its VDI destroyed
+   and its result is an error, since the restore makes VMs, not loose disks. A failed
+   `.raw` is reported as it fails.
+
+A restore that fails partway removes what it made. A VM that cannot be made, attached
+or checked for Secure Boot is destroyed with its restored VDIs (`VM.destroy` removes the
+VBDs, not the VDIs), and so are the disks of the VMs an interrupt stops before. A
+`VDI.create` or `VM.create` that gets no answer may still have been carried out by
+xapi, so each create carries a label unique to the restore: the VDI's name until the
+create answers, a `plakar_restore` key in the VM's `other_config` until the VM is made.
+After an error that is not xapi's own, the exporter waits until the SR shows no
+`vdi_create` (`VDI.create` holds it until the VDI's record exists), or looks for the VM
+again for up to 2 minutes (xapi shows no operation while it creates one), and destroys
+what carries the label. Measured on XCP-ng 8.3.0 (xapi-core 26.1.19): a `VDI.create` cut at 50 to 200 ms was
+finished by xapi each time and found; a `VM.create` cut at 1 ms was found within 20 ms.
+Not covered: xapi stopping between the SM's create and the VDI's record (an `SR.scan`
+brings the volume back), a plugin killed mid-restore, and a cleanup call that itself
+fails, which the result names. A VM that is made but fails `VM.start` is kept: it is
+complete, only not running.
 
 The restored VM is always a new VM. The prototype never overwrites an existing one.
 
@@ -289,6 +308,10 @@ VM, and before starting it, the exporter:
     (compared file by file: each host builds its tar in its own order): the VM is restored
     but not started, and its `vm.json` result is an error saying why. There is no option to start it anyway: installing the pool certificates
     and starting it is the fix, and nothing is lost by waiting.
+
+Any other error in these steps (a call that gets no answer, a clearing that fails) fails
+the VM's restore and destroys the VM and its disks: a VM whose Secure Boot state was not
+checked is not a restored VM.
 
 A restore never turns Secure Boot off: that would silently weaken a control the owner
 enabled, and it changes PCR7 too.
