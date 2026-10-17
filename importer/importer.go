@@ -3,6 +3,8 @@ package importer
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +51,13 @@ const defaultStaleAge = 24 * time.Hour
 // snapshot the sweep never finds. How long a snapshot of a large VM takes has not
 // been measured; this value is a generous guess.
 var snapshotTimeout = time.Hour
+
+// labelledWait bounds the search for a snapshot whose VM.snapshot call never returned:
+// xapi may still be taking it. A snapshot not found by then is left to the watchdog.
+var labelledWait = 10 * time.Minute
+
+// labelPollDelay is the wait between two looks at a snapshot xapi is still taking.
+var labelPollDelay = 2 * time.Second
 
 // Values of the vtpm option.
 const (
@@ -226,26 +235,105 @@ type takenSnapshot struct {
 	uuid string
 }
 
-// watch hands a snapshot to the watchdog, starting it on first use. Without a watchdog
-// the backup still runs: only the stale-snapshot sweep then covers a killed plugin.
-func (p *Importer) watch(snapUUID string) {
+// watch hands a snapshot to the watchdog, starting it on first use: its UUID, or
+// labelKey(vm, label) while VM.snapshot has not returned. Without a watchdog the backup
+// still runs: only the stale-snapshot sweep then covers a killed plugin.
+func (p *Importer) watch(key string) {
 	if p.watchdog == nil {
 		wd, err := startWatchdog(p.config)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "xcpng: warning: %s: a killed backup will leave snapshot %s behind\n", err, snapUUID)
+			fmt.Fprintf(os.Stderr, "xcpng: warning: %s: a killed backup will leave snapshot %s behind\n", err, key)
 			return
 		}
 		p.watchdog = wd
 	}
-	if err := p.watchdog.add(snapUUID); err != nil {
-		fmt.Fprintf(os.Stderr, "xcpng: warning: %s: a killed backup will leave snapshot %s behind\n", err, snapUUID)
+	if err := p.watchdog.add(key); err != nil {
+		fmt.Fprintf(os.Stderr, "xcpng: warning: %s: a killed backup will leave snapshot %s behind\n", err, key)
 	}
 }
 
-func (p *Importer) unwatch(snapUUID string) {
+func (p *Importer) unwatch(key string) {
 	if p.watchdog != nil {
-		_ = p.watchdog.remove(snapUUID)
+		_ = p.watchdog.remove(key)
 	}
+}
+
+// labelKey is how the watchdog lists a snapshot it knows only by VM and label. A UUID
+// never holds a slash, so the two kinds of key cannot be mistaken for each other.
+func labelKey(vmUUID, label string) string { return vmUUID + "/" + label }
+
+// snapshotLabel names a snapshot so that it can be found again when VM.snapshot never
+// returns its reference: the time alone is shared by two backups started in the same
+// second.
+func snapshotLabel() string {
+	var b [4]byte
+	_, _ = rand.Read(b[:]) // never fails since Go 1.24: it crashes the program instead
+	return fmt.Sprintf("plakar-%s-%s", time.Now().UTC().Format("20060102T150405Z"), hex.EncodeToString(b[:]))
+}
+
+// destroyLabelled destroys the snapshots of a VM named label, once xapi has finished
+// taking them. It returns how many it destroyed.
+//
+// xapi names the snapshot record before it has copied the VBDs, VIFs and vTPMs, and
+// ends the snapshot operation only once the whole snapshot is made (xapi_vm_clone.ml,
+// clone; xapi_vm_helpers.ml, with_vm_operation). So the snapshots are listed only after
+// the operation is gone: earlier, a half-made snapshot may be missed or destroyed under
+// xapi's feet.
+func (p *Importer) destroyLabelled(ctx context.Context, vmRef, label string) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, labelledWait)
+	defer cancel()
+	for {
+		busy, err := p.snapshotting(ctx, vmRef)
+		if err != nil {
+			return 0, err
+		}
+		if !busy {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return 0, fmt.Errorf("snapshot %s still being taken: %w", label, ctx.Err())
+		case <-time.After(labelPollDelay):
+		}
+	}
+	var snaps []string
+	if err := p.client.Call(ctx, &snaps, "VM.get_snapshots", vmRef); err != nil {
+		return 0, err
+	}
+	var errs []error
+	n := 0
+	for _, snap := range snaps {
+		var name string
+		if err := p.client.Call(ctx, &name, "VM.get_name_label", snap); err != nil {
+			if !xapi.IsCode(err, "HANDLE_INVALID") { // else destroyed since the list was read
+				errs = append(errs, err)
+			}
+			continue
+		}
+		if name != label {
+			continue
+		}
+		if err := p.destroySnapshot(ctx, snap); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		n++
+	}
+	return n, errors.Join(errs...)
+}
+
+// snapshotting reports whether xapi is taking a snapshot of the VM.
+func (p *Importer) snapshotting(ctx context.Context, vmRef string) (bool, error) {
+	var ops map[string]string
+	if err := p.client.Call(ctx, &ops, "VM.get_current_operations", vmRef); err != nil {
+		return false, err
+	}
+	for _, op := range ops {
+		if op == "snapshot" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 type snapshotDisk struct {
@@ -284,12 +372,33 @@ func (p *Importer) backupVM(ctx context.Context, vmRef string, records chan<- *c
 		_, _ = fmt.Fprintf(warnings, "xcpng: warning: VM %s: the stale-snapshot sweep failed, the backup goes on and the next backup of this VM tries again: %s\n", vmUUID, err)
 	}
 
+	// xapi finishes a snapshot even when the caller stops waiting (interrupted, timed
+	// out, connection lost), and then nobody holds its reference. Listed by label with
+	// the watchdog until it is marked, so a killed plugin does not leave it behind.
 	var snapRef string
-	label := fmt.Sprintf("plakar-%s", time.Now().UTC().Format("20060102T150405Z"))
+	label := snapshotLabel()
+	key := labelKey(vmUUID, label)
+	p.watch(key)
 	sctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
 	defer cancel()
 	if err := p.client.Call(sctx, &snapRef, "VM.snapshot", vmRef, label); err != nil {
-		return fmt.Errorf("snapshot of VM %s: %w", vmUUID, err)
+		err = fmt.Errorf("snapshot of VM %s: %w", vmUUID, err)
+		var xe *xapi.Error
+		if errors.As(err, &xe) {
+			// xapi answered: it took no snapshot, or removed what it had made.
+			p.unwatch(key)
+			return err
+		}
+		n, cerr := p.destroyLabelled(context.WithoutCancel(ctx), vmRef, label)
+		if cerr != nil {
+			// Still listed: the watchdog tries again when the plugin exits.
+			return errors.Join(err, fmt.Errorf("snapshot %s of VM %s may be left behind: %w", label, vmUUID, cerr))
+		}
+		p.unwatch(key)
+		if n > 0 {
+			_, _ = fmt.Fprintf(warnings, "xcpng: VM %s: destroyed snapshot %s, finished by xapi after the backup stopped waiting for it\n", vmUUID, label)
+		}
+		return err
 	}
 	// The marker holds the snapshot's own UUID: other_config is copied by clone and
 	// revert, and a copied marker must not make another snapshot look like ours.
@@ -304,6 +413,7 @@ func (p *Importer) backupVM(ctx context.Context, vmRef string, records chan<- *c
 	}
 
 	p.watch(snapUUID)
+	p.unwatch(key)
 
 	var pending []<-chan error
 	defer func() {

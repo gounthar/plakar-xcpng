@@ -34,10 +34,26 @@ type snapshotXAPI struct {
 	// serverTime is what host.get_servertime answers; empty means one day after the
 	// snapshot was taken.
 	serverTime string
+	// labelled makes VM.get_snapshots list the snapshot only once VM.snapshot has
+	// created it, under the label it was given.
+	labelled bool
+	// snapshotHangs makes VM.snapshot create the snapshot, then never answer.
+	snapshotHangs bool
+	// snapshotCode makes VM.snapshot fail with this XAPI error and create nothing.
+	snapshotCode string
+	// inProgress is how many VM.get_current_operations answers still show the
+	// snapshot being taken; the snapshot exists once that reaches 0.
+	inProgress int
+	// recordEarly makes the snapshot record exist while the operation still shows,
+	// as in xapi, which creates it before copying the VBDs, VIFs and vTPMs.
+	recordEarly bool
 
 	mu        sync.Mutex
 	calls     []string // "VDI.destroy <ref>", "VM.destroy <ref>"
 	restarted bool
+	label     string // what VM.snapshot was asked to name the snapshot
+	created   bool
+	opsPolls  int // VM.get_current_operations calls
 }
 
 func (f *snapshotXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +128,47 @@ func (f *snapshotXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "VDI.get_is_a_snapshot":
 		result = true
 	case "VM.get_snapshots":
+		f.mu.Lock()
 		result = []string{"OpaqueRef:snap"}
+		if f.labelled && !f.created {
+			result = []string{}
+		}
+		f.mu.Unlock()
+	case "VM.snapshot":
+		if f.snapshotCode != "" {
+			fail(f.snapshotCode)
+			return
+		}
+		f.mu.Lock()
+		f.label = arg(2)
+		f.created = f.inProgress == 0 || f.recordEarly
+		f.mu.Unlock()
+		if f.snapshotHangs {
+			<-r.Context().Done()
+			return
+		}
+		result = "OpaqueRef:snap"
+	case "VM.get_current_operations":
+		ops := map[string]string{}
+		f.mu.Lock()
+		f.opsPolls++
+		if f.inProgress > 0 {
+			f.inProgress--
+			ops["OpaqueRef:task"] = "snapshot"
+			f.created = f.inProgress == 0 || f.recordEarly
+		}
+		f.mu.Unlock()
+		result = ops
+	case "VM.get_name_label":
+		f.mu.Lock()
+		result = f.label
+		f.mu.Unlock()
+	case "VM.get_by_uuid":
+		if arg(1) != "vm-uuid" {
+			fail("UUID_INVALID")
+			return
+		}
+		result = "OpaqueRef:vm"
 	case "VM.get_record":
 		if arg(1) == "OpaqueRef:vm" {
 			result = map[string]string{"uuid": "vm-uuid"}
@@ -143,6 +199,9 @@ func (f *snapshotXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result = strings.HasPrefix(arg(1), "OpaqueRef:dom0vbd-")
 	case "VDI.destroy", "VM.destroy":
 		f.mu.Lock()
+		if f.inProgress > 0 {
+			f.calls = append(f.calls, "while snapshotting")
+		}
 		f.calls = append(f.calls, req.Method+" "+arg(1))
 		f.mu.Unlock()
 		if req.Method == "VDI.destroy" && arg(1) == f.failVDI {
@@ -390,23 +449,160 @@ func TestSweepUsesPoolClock(t *testing.T) {
 
 // A snapshot the sweep cannot remove used to fail the backup, and with vm_tag every VM
 // after it. The sweep only tidies up what an earlier backup left: the backup goes on
-// and the user is told. The fake does not know VM.snapshot, so failing there shows the
-// backup got past the sweep.
+// and the user is told. The fake refuses VM.snapshot, so failing there shows the backup
+// got past the sweep.
 func TestSweepErrorDoesNotFailBackup(t *testing.T) {
 	var out strings.Builder
 	warnings = &out
 	t.Cleanup(func() { warnings = os.Stderr })
-	f := &snapshotXAPI{failVDI: "OpaqueRef:vdi-a"}
+	f := &snapshotXAPI{failVDI: "OpaqueRef:vdi-a", snapshotCode: "VM_BAD_POWER_STATE"}
 	p := dialFake(t, f)
 	p.staleAge = time.Hour
 	p.vtpm = vtpmSkip
+	fakeWatchdog(p)
 	err := p.backupVM(context.Background(), "OpaqueRef:vm", nil, nil)
-	if !xapi.IsCode(err, "MESSAGE_METHOD_UNKNOWN") || xapi.IsCode(err, "SR_BACKEND_FAILURE_1200") {
+	if !xapi.IsCode(err, "VM_BAD_POWER_STATE") || xapi.IsCode(err, "SR_BACKEND_FAILURE_1200") {
 		t.Fatalf("err = %v, want the backup to reach VM.snapshot", err)
 	}
 	for _, want := range []string{"vm-uuid", "snap-uuid", "SR_BACKEND_FAILURE_1200"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("warning %q does not mention %q", out.String(), want)
 		}
+	}
+}
+
+// recordWatchdog stands in for the watchdog child and records the protocol lines.
+type recordWatchdog struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (r *recordWatchdog) Write(b []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lines = append(r.lines, strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")...)
+	return len(b), nil
+}
+
+func (r *recordWatchdog) Close() error { return nil }
+
+func fakeWatchdog(p *Importer) *recordWatchdog {
+	rec := &recordWatchdog{}
+	done := make(chan struct{})
+	close(done)
+	p.watchdog = &watchdog{w: rec, done: done}
+	return rec
+}
+
+func fastSnapshotGiveUp(t *testing.T) {
+	t.Helper()
+	oldTimeout, oldDelay := snapshotTimeout, labelPollDelay
+	snapshotTimeout = 200 * time.Millisecond
+	labelPollDelay = 10 * time.Millisecond
+	t.Cleanup(func() { snapshotTimeout, labelPollDelay = oldTimeout, oldDelay })
+}
+
+// xapi finishes a snapshot when the caller has stopped waiting, and the snapshot used
+// to be marked only once the call returned, so neither the watchdog nor the sweep ever
+// removed it. The backup must find it by its label and destroy it.
+func TestSnapshotGivenUpOnIsDestroyed(t *testing.T) {
+	fastSnapshotGiveUp(t)
+	f := &snapshotXAPI{labelled: true, snapshotHangs: true}
+	p := dialFake(t, f)
+	p.vtpm = vtpmSkip
+	rec := fakeWatchdog(p)
+	err := p.backupVM(context.Background(), "OpaqueRef:vm", nil, nil)
+	if err == nil {
+		t.Fatal("backup succeeded without a snapshot")
+	}
+	want := []string{"VDI.destroy OpaqueRef:vdi-a", "VDI.destroy OpaqueRef:vdi-b", "VM.destroy OpaqueRef:snap"}
+	if !slices.Equal(f.calls, want) {
+		t.Errorf("calls = %q, want %q", f.calls, want)
+	}
+	// Listed with the watchdog before the call, and no longer once it is destroyed.
+	key := "vm-uuid/" + f.label
+	if !slices.Equal(rec.lines, []string{"+" + key, "-" + key}) {
+		t.Errorf("watchdog lines = %q, want +%s then -%s", rec.lines, key, key)
+	}
+}
+
+// xapi may still be taking the snapshot when the backup looks for it: the lookup waits
+// while the VM shows a snapshot operation.
+func TestSnapshotStillInProgressIsAwaited(t *testing.T) {
+	fastSnapshotGiveUp(t)
+	f := &snapshotXAPI{labelled: true, snapshotHangs: true, inProgress: 3}
+	p := dialFake(t, f)
+	p.vtpm = vtpmSkip
+	fakeWatchdog(p)
+	if err := p.backupVM(context.Background(), "OpaqueRef:vm", nil, nil); err == nil {
+		t.Fatal("backup succeeded without a snapshot")
+	}
+	want := []string{"VDI.destroy OpaqueRef:vdi-a", "VDI.destroy OpaqueRef:vdi-b", "VM.destroy OpaqueRef:snap"}
+	if !slices.Equal(f.calls, want) {
+		t.Errorf("calls = %q, want %q", f.calls, want)
+	}
+}
+
+// xapi names the snapshot record before it has copied the VBDs, VIFs and vTPMs
+// (xapi_vm_clone.ml, clone): the lookup must leave it alone until the operation ends.
+func TestSnapshotRecordIsLeftAloneUntilFinished(t *testing.T) {
+	fastSnapshotGiveUp(t)
+	f := &snapshotXAPI{labelled: true, snapshotHangs: true, inProgress: 3, recordEarly: true}
+	p := dialFake(t, f)
+	p.vtpm = vtpmSkip
+	fakeWatchdog(p)
+	if err := p.backupVM(context.Background(), "OpaqueRef:vm", nil, nil); err == nil {
+		t.Fatal("backup succeeded without a snapshot")
+	}
+	want := []string{"VDI.destroy OpaqueRef:vdi-a", "VDI.destroy OpaqueRef:vdi-b", "VM.destroy OpaqueRef:snap"}
+	if !slices.Equal(f.calls, want) {
+		t.Errorf("calls = %q, want %q", f.calls, want)
+	}
+}
+
+// An error xapi returned means it made no snapshot: nothing to look for.
+func TestSnapshotRefusedByXAPIIsNotLookedFor(t *testing.T) {
+	fastSnapshotGiveUp(t)
+	f := &snapshotXAPI{labelled: true, snapshotCode: "VM_BAD_POWER_STATE"}
+	p := dialFake(t, f)
+	p.vtpm = vtpmSkip
+	rec := fakeWatchdog(p)
+	err := p.backupVM(context.Background(), "OpaqueRef:vm", nil, nil)
+	if !xapi.IsCode(err, "VM_BAD_POWER_STATE") {
+		t.Fatalf("err = %v, want VM_BAD_POWER_STATE", err)
+	}
+	if f.opsPolls != 0 || len(f.calls) != 0 {
+		t.Errorf("looked for a snapshot xapi refused to take: %d polls, calls %q", f.opsPolls, f.calls)
+	}
+	if len(rec.lines) != 2 || rec.lines[1] != "-"+rec.lines[0][1:] {
+		t.Errorf("watchdog lines = %q, want the label added then removed", rec.lines)
+	}
+}
+
+// A killed plugin leaves the label listed; the watchdog finds the snapshot by it.
+func TestWatchdogDestroysSnapshotByLabel(t *testing.T) {
+	fastSnapshotGiveUp(t)
+	f := &snapshotXAPI{labelled: true, created: true, label: "plakar-20261016T000000Z-0123abcd"}
+	p := dialFake(t, f)
+	if err := p.destroyListed(context.Background(), []string{"vm-uuid/" + f.label}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"VDI.destroy OpaqueRef:vdi-a", "VDI.destroy OpaqueRef:vdi-b", "VM.destroy OpaqueRef:snap"}
+	if !slices.Equal(f.calls, want) {
+		t.Errorf("calls = %q, want %q", f.calls, want)
+	}
+}
+
+// The plugin was killed before xapi made the snapshot, or the VM is gone: nothing to do.
+func TestWatchdogLabelWithoutSnapshot(t *testing.T) {
+	fastSnapshotGiveUp(t)
+	f := &snapshotXAPI{labelled: true}
+	p := dialFake(t, f)
+	keys := []string{"vm-uuid/plakar-20261016T000000Z-0123abcd", "gone-uuid/plakar-20261016T000000Z-0123abcd"}
+	if err := p.destroyListed(context.Background(), keys); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("calls = %q, want none", f.calls)
 	}
 }

@@ -37,7 +37,7 @@ suffix makes a pre-release. The packages are not signed yet.
 
 ## What a backup leaves on the pool
 
-Nothing, normally. Each backup takes a temporary snapshot named `plakar-<time>`, marked
+Nothing, normally. Each backup takes a temporary snapshot named `plakar-<time>-<random>`, marked
 `plakar_xcpng_snapshot` in its `other_config`, and destroys it with its disks at the end.
 The importer waits up to three minutes for xapi through a toolstack restart, and a watchdog
 process removes the snapshot if plakar is interrupted. A snapshot can still be left behind
