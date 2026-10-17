@@ -431,7 +431,10 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 	}
 
 	if p.opts.startOnRestore {
-		return p.client.Call(ctx, nil, "VM.start", vmRef, false, false)
+		if err := p.client.Call(ctx, nil, "VM.start", vmRef, false, false); err != nil {
+			// The VM is complete, only not running: it and its disks are kept.
+			return &heldError{fmt.Errorf("VM %q restored but not started: %w", name, err)}
+		}
 	}
 	return nil
 }
@@ -497,8 +500,9 @@ func (p *Exporter) callRetry(ctx context.Context, out any, method string, args .
 	})
 }
 
-// heldError is a VM restored in full but held back from starting: unlike any other
-// error after VM.create, it keeps the VM and its disks.
+// heldError is a VM restored in full but not started, held back for Secure Boot or
+// failing VM.start: unlike any other error after VM.create, it keeps the VM and its
+// disks, and their results report them restored.
 type heldError struct{ error }
 
 func (e *heldError) Unwrap() error { return e.error }

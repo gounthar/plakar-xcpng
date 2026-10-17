@@ -608,3 +608,21 @@ func TestSecureBootCheckSurvivesABlip(t *testing.T) {
 		t.Fatalf("destroyed %v after one dropped read", f.destroyed)
 	}
 }
+
+func TestFailedStartKeepsVMAndReportsDisksRestored(t *testing.T) {
+	f := &restoreXAPI{} // VM.start is unknown to the fake, so it fails
+	p := restoreExporter(t, f)
+	p.opts.srUUID = "sr-uuid"
+	p.opts.startOnRestore = true
+
+	got := exportRecords(t, p, diskIn("/vm", "a"), metaRecord(t, "/vm", vmJSON(t, "a")))
+	if err := got["/vm/"+xapi.MetaFilename]; err == nil || !strings.Contains(err.Error(), "not started") {
+		t.Fatalf("vm.json result %v, want the start failure", err)
+	}
+	if err := got["/vm/"+xapi.DiskFilename("0", "a")]; err != nil {
+		t.Fatalf("disk result %v: the disk is kept with its VM", err)
+	}
+	if len(f.destroyed) != 0 {
+		t.Fatalf("destroyed %v: a VM that only failed to start is kept", f.destroyed)
+	}
+}
