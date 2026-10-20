@@ -124,6 +124,12 @@ func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {
 	})
 	var errs []error
 	for _, key := range keys {
+		// The cleanup calls retry past ctx (destroyRef runs them without its
+		// cancellation), so once the watchdog's time is up, name what is left instead.
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", key, err))
+			continue
+		}
 		kind, rest, _ := strings.Cut(key, "/")
 		var err error
 		switch kind {

@@ -159,3 +159,21 @@ func TestWatchdogWaitsForABusyVDI(t *testing.T) {
 		t.Fatalf("destroyed %q with %d busy answers left", f.destroyed, f.inUse)
 	}
 }
+
+// Past the watchdog's time, a key left is reported, not given another round of retries.
+func TestWatchdogStopsWhenItsTimeIsUp(t *testing.T) {
+	f := &restoreXAPI{}
+	p := restoreExporter(t, f)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	keys := []string{"vdi/OpaqueRef:a", "vm/OpaqueRef:vm9", "vdi-label/OpaqueRef:sr/L"}
+	err := p.destroyListed(ctx, keys)
+	if len(f.destroyed) != 0 {
+		t.Fatalf("destroyed %q after the deadline", f.destroyed)
+	}
+	for _, key := range keys {
+		if err == nil || !strings.Contains(err.Error(), key) {
+			t.Errorf("error %v does not name %s", err, key)
+		}
+	}
+}
