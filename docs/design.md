@@ -269,9 +269,20 @@ for up to 3 minutes while xapi does not answer, with a new session after a tools
 restart, and each attempt has its own one-minute bound. Measured on XCP-ng 8.3.0 (xapi-core 26.1.19): a `VDI.create` cut at 50 to 200 ms was
 finished by xapi each time and found; a `VM.create` cut at 1 ms was found within 20 ms.
 Not covered: xapi stopping between the SM's create and the VDI's record (an `SR.scan`
-brings the volume back), a plugin killed mid-restore, and a cleanup call that itself
-fails, which the result names. A VM that is made but fails `VM.start` is kept: it is
-complete, only not running.
+brings the volume back), and a cleanup call that itself fails, which the result names.
+A VM that is made but fails `VM.start` is kept: it is complete, only not running.
+
+An interrupted plakar kills the exporter with SIGKILL, as it does the importer, so the
+exporter starts the same kind of watchdog at its first create (`--xcpng-restore-watchdog`).
+Each VDI and VM is listed with it before its create is sent, by SR and label or by name
+and label, then by reference once the create answers, and unlisted once it is destroyed
+or kept: a VM is kept, with its disks, once its Secure Boot check passes or holds it
+back, before `VM.start`. If the pipe closes while something is listed, the watchdog
+destroys the VMs first, then the VDIs, with the same label searches and retries as
+above. A cleanup that fails while the exporter is alive leaves its object listed, so the
+watchdog tries it once more when the exporter exits. What a killed watchdog, or a
+machine that loses power, leaves behind is named by the label or by the disk's file
+name (`<n>-<VDI UUID>.raw`).
 
 The restored VM is always a new VM. The prototype never overwrites an existing one.
 

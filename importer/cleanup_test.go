@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"integration-xcpng/internal/watchdog"
 	"integration-xcpng/internal/xapi"
 )
 
@@ -488,9 +489,7 @@ func (r *recordWatchdog) Close() error { return nil }
 
 func fakeWatchdog(p *Importer) *recordWatchdog {
 	rec := &recordWatchdog{}
-	done := make(chan struct{})
-	close(done)
-	p.watchdog = &watchdog{w: rec, done: done}
+	p.watchdog = watchdog.FromWriter(rec)
 	return rec
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/PlakarKorp/kloset/connectors"
 	"github.com/PlakarKorp/kloset/objects"
 
+	"integration-xcpng/internal/watchdog"
 	"integration-xcpng/internal/xapi"
 )
 
@@ -105,6 +106,11 @@ type restoreXAPI struct {
 	hangOnce        bool
 	refuseVM        bool
 	logins          int
+	// inUse answers that many VDI.destroy calls with VDI_IN_USE, as xapi does for a
+	// moment after an import's connection is cut.
+	inUse int
+	// held answers every VDI.destroy of these refs with VDI_IN_USE.
+	held map[string]bool
 }
 
 func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -200,6 +206,15 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "VDI.get_SR":
 		result = "OpaqueRef:sr"
 	case "VDI.destroy", "VM.destroy":
+		if req.Method == "VDI.destroy" && f.held[str(1)] {
+			xapiErr("VDI_IN_USE")
+			return
+		}
+		if req.Method == "VDI.destroy" && f.inUse > 0 {
+			f.inUse--
+			xapiErr("VDI_IN_USE")
+			return
+		}
 		f.destroyed = append(f.destroyed, str(1))
 	case "VDI.set_name_label":
 		if f.vdiLabels == nil {
@@ -279,7 +294,7 @@ func restoreExporter(t *testing.T, f *restoreXAPI) *Exporter {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Exporter{client: c}
+	return &Exporter{client: c, watchdog: watchdog.FromWriter(&recordWatchdog{})}
 }
 
 func diskRecord(data []byte) *connectors.Record {
@@ -409,7 +424,9 @@ var sbDisks = map[string]restoredDisk{"/vm/a": {ref: "OpaqueRef:a", size: 4096, 
 
 func TestSecureBootCheckFailureDestroysVMAndDisks(t *testing.T) {
 	old := cleanupRetry
-	cleanupRetry = 50 * time.Millisecond
+	// It also bounds the destroy that follows, which opens a new TLS connection after the
+	// dropped one: under riscv64 emulation that takes longer than 50 ms.
+	cleanupRetry = time.Second
 	t.Cleanup(func() { cleanupRetry = old })
 	f := &restoreXAPI{dropSB: true}
 	p := restoreExporter(t, f)

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 
+	"integration-xcpng/internal/watchdog"
 	"integration-xcpng/internal/xapi"
 )
 
@@ -146,7 +147,7 @@ func sizesExporter(t *testing.T, f *destroyRecorder, opts options) *Exporter {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Exporter{client: c, opts: opts}
+	return &Exporter{client: c, opts: opts, watchdog: watchdog.FromWriter(&recordWatchdog{})}
 }
 
 var sizesVM = pendingVM{dir: "/vm", meta: xapi.VMMeta{Disks: []xapi.DiskMeta{

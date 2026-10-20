@@ -16,6 +16,7 @@ import (
 	"github.com/PlakarKorp/kloset/connectors/exporter"
 	"github.com/PlakarKorp/kloset/location"
 
+	"integration-xcpng/internal/watchdog"
 	"integration-xcpng/internal/xapi"
 )
 
@@ -42,6 +43,9 @@ type Exporter struct {
 	cfg    *xapi.Config
 	client *xapi.Client
 	opts   options
+	// config is kept for the restore watchdog, started at the first create.
+	config   map[string]string
+	watchdog *watchdog.Watchdog
 }
 
 func NewExporter(ctx context.Context, opts *connectors.Options, name string, config map[string]string) (exporter.Exporter, error) {
@@ -78,7 +82,7 @@ func NewExporter(ctx context.Context, opts *connectors.Options, name string, con
 	if err != nil {
 		return nil, err
 	}
-	return &Exporter{cfg: cfg, client: client, opts: o}, nil
+	return &Exporter{cfg: cfg, client: client, opts: o, config: config}, nil
 }
 
 func (p *Exporter) Origin() string        { return p.cfg.Origin() }
@@ -91,7 +95,13 @@ func (p *Exporter) Ping(ctx context.Context) error {
 }
 
 func (p *Exporter) Close(ctx context.Context) error {
-	return p.client.Close(ctx)
+	var errs []error
+	if p.watchdog != nil {
+		errs = append(errs, p.watchdog.Close())
+		p.watchdog = nil
+	}
+	errs = append(errs, p.client.Close(ctx))
+	return errors.Join(errs...)
 }
 
 // restoredDisk is a VDI written from a disk record, and the size that record held.
@@ -298,6 +308,8 @@ func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, n
 	}
 	var ref string
 	label := restoreLabel()
+	key := vdiLabelKey(srRef, label)
+	p.watch(key)
 	err := p.client.Call(ctx, &ref, "VDI.create", map[string]any{
 		"name_label":       label,
 		"name_description": "restored by plakar from " + name,
@@ -314,11 +326,15 @@ func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, n
 	if err != nil {
 		if mayHaveRun(err) {
 			if cerr := p.destroyLabelledVDI(context.WithoutCancel(ctx), srRef, label); cerr != nil {
-				err = errors.Join(err, fmt.Errorf("disk %s may be left behind as VDI %q: %w", name, label, cerr))
+				// Still listed: the watchdog tries again when the plugin exits.
+				return restoredDisk{}, errors.Join(err, fmt.Errorf("disk %s may be left behind as VDI %q: %w", name, label, cerr))
 			}
 		}
+		p.unwatch(key)
 		return restoredDisk{}, err
 	}
+	p.watch(vdiKey(ref))
+	p.unwatch(key)
 	// The label was needed only while the create had not answered. attach gives the
 	// disk its original name; until then, and if a destroy later fails or the plugin is
 	// killed, the file name says more than the label.
@@ -334,6 +350,8 @@ func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, n
 	if err != nil {
 		if derr := p.client.Call(context.WithoutCancel(ctx), nil, "VDI.destroy", ref); derr != nil {
 			err = errors.Join(err, derr)
+		} else {
+			p.unwatch(vdiKey(ref))
 		}
 		return restoredDisk{}, err
 	}
@@ -396,14 +414,23 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 		return errors.Join(err, p.destroyDisks(ctx, vm, restored))
 	}
 	var vmRef string
+	key := vmLabelKey(rec["name_label"].(string), label)
+	p.watch(key)
 	if err := p.client.Call(ctx, &vmRef, "VM.create", rec); err != nil {
 		if mayHaveRun(err) {
 			if cerr := p.destroyMarkedVM(context.WithoutCancel(ctx), rec["name_label"].(string), label); cerr != nil {
+				// Still listed: the watchdog tries again when the plugin exits.
 				err = errors.Join(err, fmt.Errorf("VM %q may be left behind, marked other_config:%s=%s: %w", rec["name_label"], restoreMarkerKey, label, cerr))
+			} else {
+				p.unwatch(key)
 			}
+		} else {
+			p.unwatch(key)
 		}
 		return errors.Join(err, p.destroyDisks(ctx, vm, restored))
 	}
+	p.watch(vmKey(vmRef))
+	p.unwatch(key)
 
 	if err := p.attach(ctx, vmRef, vm, restored); err != nil {
 		return errors.Join(err, p.destroyVM(ctx, vmRef), p.destroyDisks(ctx, vm, restored))
@@ -424,11 +451,14 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 	if err := p.checkSecureBoot(ctx, vmRef, name); err != nil {
 		var held *heldError
 		if errors.As(err, &held) {
+			p.keep(vmRef, vm, restored)
 			return err
 		}
 		// A VM whose Secure Boot state was not checked is not restored.
 		return errors.Join(err, p.destroyVM(ctx, vmRef), p.destroyDisks(ctx, vm, restored))
 	}
+	// Kept from here, started or not: a VM.start that fails holds it back.
+	p.keep(vmRef, vm, restored)
 
 	if p.opts.startOnRestore {
 		if err := p.client.Call(ctx, nil, "VM.start", vmRef, false, false); err != nil {
