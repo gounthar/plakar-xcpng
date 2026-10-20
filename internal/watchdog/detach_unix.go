@@ -1,6 +1,6 @@
 //go:build unix
 
-package importer
+package watchdog
 
 import (
 	"os/exec"

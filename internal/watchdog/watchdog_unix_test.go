@@ -1,6 +1,6 @@
 //go:build unix
 
-package importer
+package watchdog
 
 import (
 	"bufio"
@@ -15,7 +15,7 @@ import (
 
 // The helpers below run inside the test binary itself, selected by an environment
 // variable: a stand-in for the plugin, which starts a stand-in for the watchdog with
-// watchdogCommand, and the watchdog stand-in, which waits for its pipe to close and then
+// Command, and the watchdog stand-in, which waits for its pipe to close and then
 // leaves a marker file, the way the real one destroys what is still listed.
 const helperEnv = "XCPNG_WATCHDOG_TEST_HELPER"
 
@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
 }
 
 func helperPlugin() int {
-	cmd := watchdogCommand(os.Args[0])
+	cmd := Command(os.Args[0])
 	cmd.Env = append(os.Environ(), helperEnv+"=watchdog")
 	cmd.Stderr = os.Stderr
 	w, err := cmd.StdinPipe()
@@ -63,9 +63,9 @@ func helperWatchdog() int {
 // helperWatchdogStderr sets up signals as the watchdog does, waits for its pipe to close,
 // writes to stderr as the watchdog does when it reports, then leaves the marker.
 func helperWatchdogStderr() int {
-	ignoreWatchdogSignals()
+	IgnoreSignals()
 	_, _ = io.Copy(io.Discard, os.Stdin)
-	_, _ = os.Stderr.WriteString("xcpng: cleanup of snapshot x: retrying\n")
+	_, _ = os.Stderr.WriteString("xcpng: cleanup of x: retrying\n")
 	return helperWatchdog()
 }
 
@@ -100,7 +100,7 @@ func TestWatchdogSurvivesDeadStderrReader(t *testing.T) {
 }
 
 // A SIGKILL to the plugin's whole process group, as `kill -9 -<pgid>` from a shell or a
-// tool does, must not reach the watchdog, or the snapshot it guards leaks.
+// tool does, must not reach the watchdog, or what it guards leaks.
 func TestWatchdogSurvivesProcessGroupKill(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "marker")
 

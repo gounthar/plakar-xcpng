@@ -20,6 +20,7 @@ import (
 	"github.com/PlakarKorp/kloset/location"
 	"github.com/PlakarKorp/kloset/objects"
 
+	"integration-xcpng/internal/watchdog"
 	"integration-xcpng/internal/xapi"
 )
 
@@ -78,7 +79,7 @@ type Importer struct {
 
 	// config is kept for the snapshot watchdog, started at the first snapshot.
 	config   map[string]string
-	watchdog *watchdog
+	watchdog *watchdog.Watchdog
 }
 
 func NewImporter(ctx context.Context, opts *connectors.Options, name string, config map[string]string) (importer.Importer, error) {
@@ -145,7 +146,7 @@ func (p *Importer) Close(ctx context.Context) error {
 	}
 	p.deferred = nil
 	if p.watchdog != nil {
-		errs = append(errs, p.watchdog.close())
+		errs = append(errs, p.watchdog.Close())
 		p.watchdog = nil
 	}
 	errs = append(errs, p.client.Close(ctx))
@@ -247,14 +248,14 @@ func (p *Importer) watch(key string) {
 		}
 		p.watchdog = wd
 	}
-	if err := p.watchdog.add(key); err != nil {
+	if err := p.watchdog.Add(key); err != nil {
 		fmt.Fprintf(os.Stderr, "xcpng: warning: %s: a killed backup will leave snapshot %s behind\n", err, key)
 	}
 }
 
 func (p *Importer) unwatch(key string) {
 	if p.watchdog != nil {
-		_ = p.watchdog.remove(key)
+		_ = p.watchdog.Remove(key)
 	}
 }
 
