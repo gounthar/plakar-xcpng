@@ -146,3 +146,16 @@ func TestVMNameCannotWriteProtocolLines(t *testing.T) {
 		t.Fatalf("listed %q", got)
 	}
 }
+
+// The watchdog starts as the plugin dies, while xapi may still hold the VDI it was
+// importing into.
+func TestWatchdogWaitsForABusyVDI(t *testing.T) {
+	f := &restoreXAPI{inUse: 3}
+	p := restoreExporter(t, f)
+	if err := p.destroyListed(context.Background(), []string{"vdi/OpaqueRef:a"}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(f.destroyed, []string{"OpaqueRef:a"}) || f.inUse != 0 {
+		t.Fatalf("destroyed %q with %d busy answers left", f.destroyed, f.inUse)
+	}
+}

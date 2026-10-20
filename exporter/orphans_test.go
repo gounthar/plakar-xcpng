@@ -106,6 +106,9 @@ type restoreXAPI struct {
 	hangOnce        bool
 	refuseVM        bool
 	logins          int
+	// inUse answers that many VDI.destroy calls with VDI_IN_USE, as xapi does for a
+	// moment after an import's connection is cut.
+	inUse int
 }
 
 func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -201,6 +204,11 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "VDI.get_SR":
 		result = "OpaqueRef:sr"
 	case "VDI.destroy", "VM.destroy":
+		if req.Method == "VDI.destroy" && f.inUse > 0 {
+			f.inUse--
+			xapiErr("VDI_IN_USE")
+			return
+		}
 		f.destroyed = append(f.destroyed, str(1))
 	case "VDI.set_name_label":
 		if f.vdiLabels == nil {

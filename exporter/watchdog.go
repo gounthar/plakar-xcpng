@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"integration-xcpng/internal/watchdog"
 	"integration-xcpng/internal/xapi"
@@ -131,7 +132,7 @@ func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {
 			if kind == "vm" {
 				method = "VM.destroy"
 			}
-			err = p.destroyRef(ctx, method, rest)
+			err = p.destroyWhenFree(ctx, method, rest)
 			if xapi.IsCode(err, "HANDLE_INVALID") {
 				continue // already gone
 			}
@@ -154,6 +155,26 @@ func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {
 		fmt.Fprintf(os.Stderr, "xcpng: cleaned up %s left by an interrupted restore\n", key)
 	}
 	return errors.Join(errs...)
+}
+
+// destroyWhenFree destroys a VDI or a VM, waiting up to restoreWait while xapi says it
+// is busy. The watchdog starts the moment the plugin dies, and xapi still holds a VDI
+// for an import whose connection was just cut: on XCP-ng 8.3 the first VDI.destroy got
+// VDI_IN_USE, and the VDI was free to destroy two minutes later.
+func (p *Exporter) destroyWhenFree(ctx context.Context, method, ref string) error {
+	deadline := time.Now().Add(restoreWait)
+	for {
+		err := p.destroyRef(ctx, method, ref)
+		busy := xapi.IsCode(err, "VDI_IN_USE") || xapi.IsCode(err, "OTHER_OPERATION_IN_PROGRESS")
+		if !busy || !time.Now().Before(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-time.After(restorePollDelay):
+		}
+	}
 }
 
 // IsWatchdog reports whether the process was started as the restore watchdog.
