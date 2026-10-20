@@ -30,6 +30,9 @@ import (
 // maxLine bounds a protocol line; the configuration is the longest.
 const maxLine = 1 << 20
 
+// maxKey leaves room in a line for the operation byte and the newline.
+const maxKey = maxLine - 2
+
 // CleanupTimeout bounds the watchdog's cleanup of everything still listed.
 const CleanupTimeout = 10 * time.Minute
 
@@ -102,12 +105,17 @@ func (wd *Watchdog) send(line string) error {
 
 // Add and Remove refuse a key holding a line break: it would end the line and make
 // the rest a protocol line of its own, listing or unlisting what the key never named.
+// They refuse a key too long for Read as well, which stops at such a line and would
+// lose every unlisting after it.
 func (wd *Watchdog) Add(key string) error    { return wd.sendKey('+', key) }
 func (wd *Watchdog) Remove(key string) error { return wd.sendKey('-', key) }
 
 func (wd *Watchdog) sendKey(op byte, key string) error {
 	if strings.ContainsAny(key, "\r\n") {
 		return fmt.Errorf("%s: key %q holds a line break", wd.name, key)
+	}
+	if len(key) > maxKey {
+		return fmt.Errorf("%s: key of %d bytes is too long", wd.name, len(key))
 	}
 	return wd.send(string(op) + key)
 }

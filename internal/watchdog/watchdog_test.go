@@ -76,6 +76,31 @@ func TestKeyWithLineBreakIsRefused(t *testing.T) {
 	}
 }
 
+// Read stops at a line it cannot hold, and every unlisting after it would be lost.
+func TestKeyTooLongForReadIsRefused(t *testing.T) {
+	var b strings.Builder
+	wd := FromWriter(nopCloser{&b})
+	if err := wd.Add(strings.Repeat("k", maxKey+1)); err == nil {
+		t.Fatal("a key too long for Read was accepted")
+	}
+	longest := strings.Repeat("k", maxKey)
+	for _, step := range []func(string) error{wd.Add, wd.Remove} {
+		if err := step(longest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := wd.Add("a"); err != nil {
+		t.Fatal(err)
+	}
+	_, pending, err := Read(strings.NewReader("{}\n" + b.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(pending, []string{"a"}) {
+		t.Fatalf("pending = %.40q, want [a]: Read lost lines after the longest key", pending)
+	}
+}
+
 type nopCloser struct{ *strings.Builder }
 
 func (nopCloser) Close() error { return nil }
