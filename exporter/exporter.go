@@ -454,6 +454,7 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 		var held *heldError
 		if errors.As(err, &held) {
 			p.keep(vmRef, vm, restored)
+			labPause("kept")
 			return err
 		}
 		// A VM whose Secure Boot state was not checked is not restored.

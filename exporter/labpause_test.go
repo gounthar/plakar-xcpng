@@ -49,4 +49,7 @@ func TestLabPause(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("labPause did not return after the pause file was removed")
 	}
+	if _, err := os.Stat(filepath.Join(labPauseDir, "at-vm-created")); err == nil {
+		t.Fatal("at-vm-created left after labPause returned")
+	}
 }

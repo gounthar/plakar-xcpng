@@ -15,17 +15,23 @@ import (
 var labPauseDir = "/var/tmp/plakar-xcpng-lab"
 
 // labPause stops at phase while pause-<phase> exists in labPauseDir. On arrival it
-// creates at-<phase>, which the script waits for before it interrupts the restore.
+// creates at-<phase>, which the script waits for before it interrupts the restore, and
+// removes it when it goes on, so a later restore cannot be taken for one already there.
+// A killed plugin leaves it: the script clears both files before each restore.
 func labPause(phase string) {
 	pause := filepath.Join(labPauseDir, "pause-"+phase)
 	if _, err := os.Stat(pause); err != nil {
 		return
 	}
-	if err := os.WriteFile(filepath.Join(labPauseDir, "at-"+phase), nil, 0o644); err != nil {
+	at := filepath.Join(labPauseDir, "at-"+phase)
+	if err := os.WriteFile(at, nil, 0o644); err != nil {
 		warnf("lab pause %s: %s", phase, err)
 	}
 	for {
 		if _, err := os.Stat(pause); errors.Is(err, fs.ErrNotExist) {
+			if err := os.Remove(at); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				warnf("lab pause %s: %s", phase, err)
+			}
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
