@@ -59,3 +59,23 @@ func TestIs(t *testing.T) {
 		t.Error("plugin invocation taken for the watchdog")
 	}
 }
+
+func TestKeyWithLineBreakIsRefused(t *testing.T) {
+	var b strings.Builder
+	wd := FromWriter(nopCloser{&b})
+	for _, key := range []string{"a\n+b", "a\r", "\n"} {
+		if err := wd.Add(key); err == nil {
+			t.Errorf("Add(%q) accepted", key)
+		}
+		if err := wd.Remove(key); err == nil {
+			t.Errorf("Remove(%q) accepted", key)
+		}
+	}
+	if b.Len() != 0 {
+		t.Fatalf("wrote %q", b.String())
+	}
+}
+
+type nopCloser struct{ *strings.Builder }
+
+func (nopCloser) Close() error { return nil }

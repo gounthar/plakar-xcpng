@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 
 	"integration-xcpng/internal/watchdog"
@@ -20,15 +21,18 @@ import (
 // is kept as part of a restored VM or destroyed, so a plugin killed in between, which is
 // what an interrupted plakar does, leaves nothing behind. A key says what it names:
 // "vdi/<ref>" and "vm/<ref>" once the create has answered, "vdi-label/<SR ref>/<label>"
-// and "vm-label/<label>/<VM name>" while it has not. A reference never holds a slash,
-// nor does a label, so the VM name, which may, comes last.
+// and "vm-label/<label>/<VM name, Go-quoted>" while it has not. A reference never
+// holds a slash, nor does a label, so the VM name, which may, comes last.
 const WatchdogArg = "--xcpng-restore-watchdog"
 
 func vdiKey(ref string) string               { return "vdi/" + ref }
 func vmKey(ref string) string                { return "vm/" + ref }
 func vdiLabelKey(srRef, label string) string { return "vdi-label/" + srRef + "/" + label }
-func vmLabelKey(name, label string) string   { return "vm-label/" + label + "/" + name }
-func isVMKey(key string) bool                { return strings.HasPrefix(key, "vm") }
+
+// vmLabelKey quotes the VM name, which comes from the backup's vm.json, so that a
+// name holding a line break cannot write protocol lines of its own.
+func vmLabelKey(name, label string) string { return "vm-label/" + label + "/" + strconv.Quote(name) }
+func isVMKey(key string) bool              { return strings.HasPrefix(key, "vm") }
 func destroyedKey(method, ref string) string {
 	if method == "VM.destroy" {
 		return vmKey(ref)
@@ -135,8 +139,11 @@ func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {
 			srRef, label, _ := strings.Cut(rest, "/")
 			err = p.destroyLabelledVDI(ctx, srRef, label)
 		case "vm-label":
-			label, name, _ := strings.Cut(rest, "/")
-			err = p.destroyMarkedVM(ctx, name, label)
+			label, quoted, _ := strings.Cut(rest, "/")
+			var name string
+			if name, err = strconv.Unquote(quoted); err == nil {
+				err = p.destroyMarkedVM(ctx, name, label)
+			}
 		default:
 			continue
 		}

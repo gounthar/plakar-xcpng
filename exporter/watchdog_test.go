@@ -111,7 +111,7 @@ func TestWatchdogDestroysVMsFirst(t *testing.T) {
 		vmMarkers: map[string]string{"OpaqueRef:vmM": "M"},
 	}
 	p := restoreExporter(t, f)
-	keys := []string{"vdi/OpaqueRef:a", "vdi-label/OpaqueRef:sr/L", "vm/OpaqueRef:vm9", "vm-label/M/web (restored)"}
+	keys := []string{"vdi/OpaqueRef:a", "vdi-label/OpaqueRef:sr/L", "vm/OpaqueRef:vm9", `vm-label/M/"web (restored)"`}
 	if err := p.destroyListed(context.Background(), keys); err != nil {
 		t.Fatal(err)
 	}
@@ -127,5 +127,22 @@ func TestIsWatchdog(t *testing.T) {
 	}
 	if IsWatchdog([]string{"xcpngExporter"}) {
 		t.Error("plugin invocation taken for the watchdog")
+	}
+}
+
+// A VM name comes from the backup. One holding a line break must not add a line of its
+// own to the list, here one naming a VDI the restore never made.
+func TestVMNameCannotWriteProtocolLines(t *testing.T) {
+	p, rec := recordedExporter(t, &restoreXAPI{})
+	evil := pendingVM{dir: "/vm", meta: sbVM.meta}
+	evil.meta.VM = map[string]any{"name_label": "x\n+vdi/OpaqueRef:victim"}
+	_ = p.createVM(context.Background(), evil, map[string]restoredDisk{"/vm/a": sbDisks["/vm/a"]}, true)
+	for _, l := range rec.lines {
+		if strings.Contains(l, "victim") && !strings.HasPrefix(l, "+vm-label/") && !strings.HasPrefix(l, "-vm-label/") {
+			t.Fatalf("the VM name wrote a protocol line of its own: %q", rec.lines)
+		}
+	}
+	if got := rec.pending(t); slices.Contains(got, "vdi/OpaqueRef:victim") {
+		t.Fatalf("listed %q", got)
 	}
 }

@@ -100,8 +100,17 @@ func (wd *Watchdog) send(line string) error {
 	return nil
 }
 
-func (wd *Watchdog) Add(key string) error    { return wd.send("+" + key) }
-func (wd *Watchdog) Remove(key string) error { return wd.send("-" + key) }
+// Add and Remove refuse a key holding a line break: it would end the line and make
+// the rest a protocol line of its own, listing or unlisting what the key never named.
+func (wd *Watchdog) Add(key string) error    { return wd.sendKey('+', key) }
+func (wd *Watchdog) Remove(key string) error { return wd.sendKey('-', key) }
+
+func (wd *Watchdog) sendKey(op byte, key string) error {
+	if strings.ContainsAny(key, "\r\n") {
+		return fmt.Errorf("%s: key %q holds a line break", wd.name, key)
+	}
+	return wd.send(string(op) + key)
+}
 
 // Close tells the watchdog the plugin is done. Objects still listed are destroyed by
 // the watchdog, so this waits for it, within a bound.
