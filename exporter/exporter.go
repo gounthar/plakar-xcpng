@@ -429,12 +429,14 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 		}
 		return errors.Join(err, p.destroyDisks(ctx, vm, restored))
 	}
+	labPause("vm-created")
 	p.watch(vmKey(vmRef))
 	p.unwatch(key)
 
 	if err := p.attach(ctx, vmRef, vm, restored); err != nil {
 		return errors.Join(err, p.destroyVM(ctx, vmRef), p.destroyDisks(ctx, vm, restored))
 	}
+	labPause("attached")
 	if err := p.client.Call(ctx, nil, "VM.remove_from_other_config", vmRef, restoreMarkerKey); err != nil {
 		warnf("VM %q: removing other_config:%s: %s", name, restoreMarkerKey, err)
 	}
@@ -459,6 +461,7 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 	}
 	// Kept from here, started or not: a VM.start that fails holds it back.
 	p.keep(vmRef, vm, restored)
+	labPause("kept")
 
 	if p.opts.startOnRestore {
 		if err := p.client.Call(ctx, nil, "VM.start", vmRef, false, false); err != nil {
@@ -493,6 +496,7 @@ func (p *Exporter) checkSecureBoot(ctx context.Context, vmRef, name string) erro
 		warnf("VM %q keeps its 2011 Secure Boot certificates, which expire in 2026: the target pool's update to the 2023 ones was cleared to protect a key sealed to its vTPM; set keep_secureboot_update=true to keep the update", name)
 	}
 
+	labPause("secureboot")
 	var readiness string
 	err = p.callRetry(ctx, &readiness, "VM.get_secureboot_readiness", vmRef)
 	if xapi.IsCode(err, "MESSAGE_METHOD_UNKNOWN") {
