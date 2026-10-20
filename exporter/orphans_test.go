@@ -111,6 +111,9 @@ type restoreXAPI struct {
 	inUse int
 	// held answers every VDI.destroy of these refs with VDI_IN_USE.
 	held map[string]bool
+	// heldFor answers that many VDI.destroy calls of a ref with VDI_IN_USE, then lets
+	// it go.
+	heldFor map[string]int
 }
 
 func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -207,6 +210,11 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result = "OpaqueRef:sr"
 	case "VDI.destroy", "VM.destroy":
 		if req.Method == "VDI.destroy" && f.held[str(1)] {
+			xapiErr("VDI_IN_USE")
+			return
+		}
+		if req.Method == "VDI.destroy" && f.heldFor[str(1)] > 0 {
+			f.heldFor[str(1)]--
 			xapiErr("VDI_IN_USE")
 			return
 		}
