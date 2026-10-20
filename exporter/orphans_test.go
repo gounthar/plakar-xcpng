@@ -18,6 +18,7 @@ import (
 	"github.com/PlakarKorp/kloset/connectors"
 	"github.com/PlakarKorp/kloset/objects"
 
+	"integration-xcpng/internal/watchdog"
 	"integration-xcpng/internal/xapi"
 )
 
@@ -279,7 +280,7 @@ func restoreExporter(t *testing.T, f *restoreXAPI) *Exporter {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Exporter{client: c}
+	return &Exporter{client: c, watchdog: watchdog.FromWriter(&recordWatchdog{})}
 }
 
 func diskRecord(data []byte) *connectors.Record {
