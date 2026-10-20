@@ -424,7 +424,9 @@ var sbDisks = map[string]restoredDisk{"/vm/a": {ref: "OpaqueRef:a", size: 4096, 
 
 func TestSecureBootCheckFailureDestroysVMAndDisks(t *testing.T) {
 	old := cleanupRetry
-	cleanupRetry = 50 * time.Millisecond
+	// It also bounds the destroy that follows, which opens a new TLS connection after the
+	// dropped one: under riscv64 emulation that takes longer than 50 ms.
+	cleanupRetry = time.Second
 	t.Cleanup(func() { cleanupRetry = old })
 	f := &restoreXAPI{dropSB: true}
 	p := restoreExporter(t, f)

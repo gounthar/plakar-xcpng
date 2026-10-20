@@ -93,7 +93,9 @@ func TestHeldVMIsUnlisted(t *testing.T) {
 
 func TestDestroyedVMIsUnlisted(t *testing.T) {
 	old := cleanupRetry
-	cleanupRetry = 50 * time.Millisecond
+	// It also bounds the destroy that follows, which opens a new TLS connection after the
+	// dropped one: under riscv64 emulation that takes longer than 50 ms.
+	cleanupRetry = time.Second
 	t.Cleanup(func() { cleanupRetry = old })
 	p, rec := recordedExporter(t, &restoreXAPI{dropSB: true})
 	restored := restoreOneDisk(t, p)
