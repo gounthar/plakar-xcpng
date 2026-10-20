@@ -111,6 +111,13 @@ func destroyLeftovers(ctx context.Context, config map[string]string, keys []stri
 
 // destroyListed destroys what the watchdog still lists, VMs first: VM.destroy leaves
 // the VDIs, which then have no VBD left to hold them.
+//
+// A VDI or VM xapi says is busy is put aside and retried, with the others put aside,
+// every restorePollDelay for up to restoreWait. The watchdog starts the moment the
+// plugin dies, and xapi still holds a VDI for an import whose connection was just cut:
+// on XCP-ng 8.3 the first VDI.destroy got VDI_IN_USE, and the VDI was free to destroy
+// two minutes later. Each key gets its first try before any wait, so one held long
+// cannot use up the watchdog's time while the others wait their turn.
 func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {
 	keys = slices.Clone(keys)
 	slices.SortStableFunc(keys, func(a, b string) int {
@@ -123,64 +130,78 @@ func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {
 		return 1
 	})
 	var errs []error
-	for _, key := range keys {
+	var busy []string
+	last := map[string]error{}
+	try := func(key string) {
 		// The cleanup calls retry past ctx (destroyRef runs them without its
 		// cancellation), so once the watchdog's time is up, name what is left instead.
 		if err := ctx.Err(); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", key, err))
-			continue
+			return
 		}
-		kind, rest, _ := strings.Cut(key, "/")
-		var err error
-		switch kind {
-		case "vm", "vdi":
-			method := "VDI.destroy"
-			if kind == "vm" {
-				method = "VM.destroy"
-			}
-			err = p.destroyWhenFree(ctx, method, rest)
-			if xapi.IsCode(err, "HANDLE_INVALID") {
-				continue // already gone
-			}
-		case "vdi-label":
-			srRef, label, _ := strings.Cut(rest, "/")
-			err = p.destroyLabelledVDI(ctx, srRef, label)
-		case "vm-label":
-			label, quoted, _ := strings.Cut(rest, "/")
-			var name string
-			if name, err = strconv.Unquote(quoted); err == nil {
-				err = p.destroyMarkedVM(ctx, name, label)
-			}
-		default:
-			continue
-		}
-		if err != nil {
+		switch err := p.destroyKey(ctx, key); {
+		case xapi.IsCode(err, "VDI_IN_USE") || xapi.IsCode(err, "OTHER_OPERATION_IN_PROGRESS"):
+			busy = append(busy, key)
+			last[key] = err
+		case errors.Is(err, errGone):
+		case err != nil:
 			errs = append(errs, fmt.Errorf("%s: %w", key, err))
-			continue
+		default:
+			fmt.Fprintf(os.Stderr, "xcpng: cleaned up %s left by an interrupted restore\n", key)
 		}
-		fmt.Fprintf(os.Stderr, "xcpng: cleaned up %s left by an interrupted restore\n", key)
+	}
+	for _, key := range keys {
+		try(key)
+	}
+
+	deadline := time.Now().Add(restoreWait)
+	for len(busy) > 0 && time.Now().Before(deadline) && ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+			continue
+		case <-time.After(restorePollDelay):
+		}
+		retry := busy
+		busy = nil
+		for _, key := range retry {
+			try(key)
+		}
+	}
+	for _, key := range busy {
+		errs = append(errs, fmt.Errorf("%s: %w", key, errors.Join(last[key], ctx.Err())))
 	}
 	return errors.Join(errs...)
 }
 
-// destroyWhenFree destroys a VDI or a VM, waiting up to restoreWait while xapi says it
-// is busy. The watchdog starts the moment the plugin dies, and xapi still holds a VDI
-// for an import whose connection was just cut: on XCP-ng 8.3 the first VDI.destroy got
-// VDI_IN_USE, and the VDI was free to destroy two minutes later.
-func (p *Exporter) destroyWhenFree(ctx context.Context, method, ref string) error {
-	deadline := time.Now().Add(restoreWait)
-	for {
-		err := p.destroyRef(ctx, method, ref)
-		busy := xapi.IsCode(err, "VDI_IN_USE") || xapi.IsCode(err, "OTHER_OPERATION_IN_PROGRESS")
-		if !busy || !time.Now().Before(deadline) {
+// errGone is what destroyKey returns for a key with nothing left to destroy.
+var errGone = errors.New("nothing to destroy")
+
+// destroyKey destroys what one watchdog key names.
+func (p *Exporter) destroyKey(ctx context.Context, key string) error {
+	kind, rest, _ := strings.Cut(key, "/")
+	switch kind {
+	case "vm", "vdi":
+		method := "VDI.destroy"
+		if kind == "vm" {
+			method = "VM.destroy"
+		}
+		err := p.destroyRef(ctx, method, rest)
+		if xapi.IsCode(err, "HANDLE_INVALID") {
+			return errGone
+		}
+		return err
+	case "vdi-label":
+		srRef, label, _ := strings.Cut(rest, "/")
+		return p.destroyLabelledVDI(ctx, srRef, label)
+	case "vm-label":
+		label, quoted, _ := strings.Cut(rest, "/")
+		name, err := strconv.Unquote(quoted)
+		if err != nil {
 			return err
 		}
-		select {
-		case <-ctx.Done():
-			return errors.Join(err, ctx.Err())
-		case <-time.After(restorePollDelay):
-		}
+		return p.destroyMarkedVM(ctx, name, label)
 	}
+	return errGone
 }
 
 // IsWatchdog reports whether the process was started as the restore watchdog.

@@ -177,3 +177,22 @@ func TestWatchdogStopsWhenItsTimeIsUp(t *testing.T) {
 		}
 	}
 }
+
+// A VDI xapi holds for longer than the watchdog has must not keep the next one from
+// being destroyed.
+func TestOneHeldVDIDoesNotBlockTheOthers(t *testing.T) {
+	old := restorePollDelay
+	restorePollDelay = time.Millisecond
+	t.Cleanup(func() { restorePollDelay = old })
+	f := &restoreXAPI{held: map[string]bool{"OpaqueRef:held": true}}
+	p := restoreExporter(t, f)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	err := p.destroyListed(ctx, []string{"vdi/OpaqueRef:held", "vdi/OpaqueRef:b"})
+	if !slices.Equal(f.destroyed, []string{"OpaqueRef:b"}) {
+		t.Fatalf("destroyed %q, want the VDI after the held one", f.destroyed)
+	}
+	if err == nil || !strings.Contains(err.Error(), "vdi/OpaqueRef:held") || !strings.Contains(err.Error(), "VDI_IN_USE") {
+		t.Fatalf("error %v does not name the held VDI and why", err)
+	}
+}
