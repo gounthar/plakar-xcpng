@@ -198,3 +198,19 @@ func TestOneHeldVDIDoesNotBlockTheOthers(t *testing.T) {
 		t.Fatalf("error %v does not name the held VDI and why", err)
 	}
 }
+
+// A VDI held ahead of a free one: the free one goes first, the held one once xapi
+// lets it go.
+func TestAHeldVDIGoesOnceReleased(t *testing.T) {
+	old := restorePollDelay
+	restorePollDelay = time.Millisecond
+	t.Cleanup(func() { restorePollDelay = old })
+	f := &restoreXAPI{heldFor: map[string]int{"OpaqueRef:held": 2}}
+	p := restoreExporter(t, f)
+	if err := p.destroyListed(context.Background(), []string{"vdi/OpaqueRef:held", "vdi/OpaqueRef:b"}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(f.destroyed, []string{"OpaqueRef:b", "OpaqueRef:held"}) || f.heldFor["OpaqueRef:held"] != 0 {
+		t.Fatalf("destroyed %q with %d busy answers left", f.destroyed, f.heldFor["OpaqueRef:held"])
+	}
+}
