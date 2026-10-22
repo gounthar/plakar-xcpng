@@ -90,6 +90,7 @@ type restoreXAPI struct {
 	busyLooks  int
 	vdiLabels  map[string]string // ref -> name_label
 	vmMarkers  map[string]string // ref -> other_config marker
+	vdiDescs   []string          // name_description of each VDI.create
 	destroyed  []string          // VDIs and VMs, in order
 	unmarked   []string
 	lookups    int // VDI.get_by_name_label and VM.get_by_name_label calls
@@ -176,9 +177,11 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var rec struct {
-			NameLabel string `json:"name_label"`
+			NameLabel       string `json:"name_label"`
+			NameDescription string `json:"name_description"`
 		}
 		_ = json.Unmarshal(req.Params[1], &rec)
+		f.vdiDescs = append(f.vdiDescs, rec.NameDescription)
 		ref := fmt.Sprintf("OpaqueRef:vdi%d", len(f.vdiLabels))
 		if f.vdiLabels == nil {
 			f.vdiLabels = map[string]string{}

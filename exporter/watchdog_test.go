@@ -346,9 +346,10 @@ func stderrOf(t *testing.T, f func()) string {
 }
 
 // A dead watchdog is said once, in terms a user can look for, not once per key with
-// the key's xapi reference.
+// the key's xapi reference: the restore's own ID, which every object it made carries.
 func TestLostWatchdogIsSaidOnce(t *testing.T) {
-	p := restoreExporter(t, &restoreXAPI{})
+	f := &restoreXAPI{}
+	p := restoreExporter(t, f)
 	p.watchdog = watchdog.FromWriter(deadWatchdog{})
 	var closeErr error
 	out := stderrOf(t, func() {
@@ -363,6 +364,20 @@ func TestLostWatchdogIsSaidOnce(t *testing.T) {
 	}
 	if strings.Contains(out, "OpaqueRef") {
 		t.Errorf("a warning names an xapi reference:\n%s", out)
+	}
+	id := p.restoreID()
+	if !strings.Contains(out, id) {
+		t.Errorf("the warning does not name restore %s:\n%s", id, out)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.vdiDescs) != 1 || !strings.Contains(f.vdiDescs[0], id) {
+		t.Errorf("VDI descriptions %q do not hold %s", f.vdiDescs, id)
+	}
+	for ref, m := range f.vmMarkers {
+		if ref != "OpaqueRef:samename" && !strings.HasPrefix(m, id+"-") {
+			t.Errorf("VM %s marked %q, not under %s", ref, m, id)
+		}
 	}
 	if errors.Is(closeErr, os.ErrClosed) {
 		t.Errorf("Close failed on the watchdog already reported: %v", closeErr)

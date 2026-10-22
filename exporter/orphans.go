@@ -43,12 +43,26 @@ var attemptTimeout = time.Minute
 // restorePollDelay is the wait between two looks at a create xapi may still be running.
 var restorePollDelay = 2 * time.Second
 
-// restoreLabel names a created object so that it can be found again: the time alone
-// is shared by two restores started in the same second.
-func restoreLabel() string {
-	var b [4]byte
-	_, _ = rand.Read(b[:]) // never fails since Go 1.24: it crashes the program instead
-	return fmt.Sprintf("plakar-restore-%s-%s", time.Now().UTC().Format("20060102T150405Z"), hex.EncodeToString(b[:]))
+// randomHex returns n random bytes in hex.
+func randomHex(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b) // never fails since Go 1.24: it crashes the program instead
+	return hex.EncodeToString(b)
+}
+
+// restoreID names this restore, the prefix of every label it gives: a user told the
+// watchdog is gone can search the pool for it. The time alone is shared by two
+// restores started in the same second.
+func (p *Exporter) restoreID() string {
+	if p.id == "" {
+		p.id = fmt.Sprintf("plakar-restore-%s-%s", time.Now().UTC().Format("20060102T150405Z"), randomHex(4))
+	}
+	return p.id
+}
+
+// restoreLabel names a created object so that it can be found again.
+func (p *Exporter) restoreLabel() string {
+	return p.restoreID() + "-" + randomHex(4)
 }
 
 // neverSent reports whether a call failed before its request left: the connection to

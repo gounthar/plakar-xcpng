@@ -70,9 +70,9 @@ func (p *Exporter) watch(key string) {
 // The restore itself goes on, its in-process cleanup unchanged.
 func (p *Exporter) loseWatchdog(err error) {
 	p.watchdogLost = true
-	warnf("the restore goes on, but if it is killed from here, what it has made and not finished stays on the pool: "+
-		"VMs whose other_config holds %s, and VDIs described \"restored by plakar from ...\" that no VM uses (%s)",
-		restoreMarkerKey, err)
+	warnf("the restore goes on, but if it is killed from here, what it has made and not finished stays on the pool, "+
+		"named by %[1]s: VMs whose other_config:%[2]s starts with it, and VDIs no VM uses whose name or description holds it (%[3]s)",
+		p.restoreID(), restoreMarkerKey, err)
 }
 
 func (p *Exporter) unwatch(key string) {

@@ -49,6 +49,8 @@ type Exporter struct {
 	// watchdogLost is set once the watchdog could not be started or stopped taking
 	// keys: the user is told once, and it is not tried again.
 	watchdogLost bool
+	// id names this restore, see restoreID.
+	id string
 }
 
 func NewExporter(ctx context.Context, opts *connectors.Options, name string, config map[string]string) (exporter.Exporter, error) {
@@ -322,12 +324,12 @@ func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, n
 		return restoredDisk{}, err
 	}
 	var ref string
-	label := restoreLabel()
+	label := p.restoreLabel()
 	key := vdiLabelKey(srRef, label)
 	p.watch(key)
 	err := p.client.Call(ctx, &ref, "VDI.create", map[string]any{
 		"name_label":       label,
-		"name_description": "restored by plakar from " + name,
+		"name_description": "restored by plakar from " + name + " (" + p.restoreID() + ")",
 		"SR":               srRef,
 		"virtual_size":     size,
 		"type":             "user",
@@ -420,7 +422,7 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 		// A copy beside the original must not derive the same MAC addresses.
 		delete(oc, "mac_seed")
 	}
-	label := restoreLabel()
+	label := p.restoreLabel()
 	oc[restoreMarkerKey] = label
 	rec["other_config"] = oc
 
