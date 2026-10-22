@@ -118,6 +118,32 @@ func (p *Exporter) destroyRef(ctx context.Context, bound time.Duration, method, 
 	return err
 }
 
+// heldByXapi reports whether xapi refused a destroy because it still holds the object: an
+// import whose connection was just cut keeps its VDI for a while (see destroyListed).
+func heldByXapi(err error) bool {
+	return xapi.IsCode(err, "VDI_IN_USE") || xapi.IsCode(err, "OTHER_OPERATION_IN_PROGRESS")
+}
+
+// destroyVDI is destroyRef for the restore's own cleanup of a VDI: while xapi holds
+// the VDI, it is tried again every restorePollDelay for up to restoreWait. Left to the
+// watchdog instead, it would be reported as left by an interrupted restore. Once ctx
+// is done the waiting stops, the VDI stays listed, and the watchdog destroys it when
+// the plugin exits: an interrupted restore must not hold up its exit for it.
+func (p *Exporter) destroyVDI(ctx context.Context, ref string) error {
+	deadline := time.Now().Add(restoreWait)
+	for {
+		err := p.destroyRef(ctx, cleanupRetry, "VDI.destroy", ref)
+		if !heldByXapi(err) || !time.Now().Before(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(restorePollDelay):
+		}
+	}
+}
+
 // destroyLabelledVDI destroys the VDIs of the SR named label, once xapi has finished
 // creating them. VDI.create holds a vdi_create operation on the SR until the VDI's
 // record is written (message_forwarding.ml, with_sr_andor_vdi); earlier, the record

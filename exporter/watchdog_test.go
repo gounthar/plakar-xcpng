@@ -245,3 +245,44 @@ func TestCutTryKeepsTheBusyReason(t *testing.T) {
 		t.Fatalf("error %v does not say the VDI was held", err)
 	}
 }
+
+// A restore failing right after a cut import gets VDI_IN_USE from its own cleanup:
+// it waits for xapi to let the VDI go rather than leave it to the watchdog, which
+// would report it as left by an interrupted restore.
+func TestInProcessCleanupWaitsForAHeldVDI(t *testing.T) {
+	f := &restoreXAPI{}
+	p, rec := recordedExporter(t, f)
+	restored := restoreOneDisk(t, p)
+	f.heldFor = map[string]int{"OpaqueRef:vdi0": 2}
+	if err := p.destroyDisks(context.Background(), sbVM, restored); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(f.destroyed, []string{"OpaqueRef:vdi0"}) {
+		t.Fatalf("destroyed %q, want OpaqueRef:vdi0", f.destroyed)
+	}
+	if got := rec.pending(t); len(got) != 0 {
+		t.Fatalf("left %q listed for the watchdog", got)
+	}
+}
+
+// An interrupted restore does not wait for a held VDI: the user asked it to stop, and
+// the watchdog destroys the VDI once the plugin exits.
+func TestInterruptedCleanupLeavesAHeldVDIToTheWatchdog(t *testing.T) {
+	f := &restoreXAPI{}
+	p, rec := recordedExporter(t, f)
+	restored := restoreOneDisk(t, p)
+	f.heldFor = map[string]int{"OpaqueRef:vdi0": 1 << 20}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	err := p.destroyDisks(ctx, sbVM, restored)
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("an interrupted cleanup waited %s for a held VDI", took)
+	}
+	if err == nil || !strings.Contains(err.Error(), "VDI_IN_USE") {
+		t.Fatalf("error %v does not say the VDI was held", err)
+	}
+	if got := rec.pending(t); !slices.Equal(got, []string{"vdi/OpaqueRef:vdi0"}) {
+		t.Fatalf("listed %q, want the held VDI left to the watchdog", got)
+	}
+}
