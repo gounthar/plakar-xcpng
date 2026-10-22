@@ -199,7 +199,9 @@ func (p *Exporter) Export(ctx context.Context, records <-chan *connectors.Record
 	// A disk is restored as part of its VM. One that no vm.json lists would be left
 	// with no VM, so it goes; one whose VM failed is already gone with it. No path in
 	// the messages: plakar prefixes every record error with it.
-	for _, d := range disks {
+	errs := make([]error, len(disks))
+	var unowned []string
+	for i, d := range disks {
 		var err error
 		switch {
 		case owned[d.key] && failed[d.dir]:
@@ -213,9 +215,16 @@ func (p *Exporter) Export(ctx context.Context, records <-chan *connectors.Record
 			err = fmt.Errorf("no %s in the restore for this disk, so no VM to attach it to: its VDI was destroyed", xapi.MetaFilename)
 		}
 		if err != nil && !owned[d.key] {
-			if derr := p.destroyVDI(ctx, d.ref); derr != nil {
-				err = fmt.Errorf("%w; destroying VDI %s failed: %w", err, d.ref, derr)
-			}
+			unowned = append(unowned, d.ref)
+		}
+		errs[i] = err
+	}
+	// Destroyed together, so that several held VDIs share one wait.
+	left := p.destroyVDIs(ctx, unowned)
+	for i, d := range disks {
+		err := errs[i]
+		if derr := left[d.ref]; derr != nil && !owned[d.key] {
+			err = fmt.Errorf("%w; destroying VDI %s failed: %w", err, d.ref, derr)
 		}
 		results <- result(d.record, err)
 	}
@@ -657,13 +666,16 @@ func (p *Exporter) checkDiskSizes(ctx context.Context, vm pendingVM, restored ma
 // ctx is done: an interrupted restore must not leave them behind either.
 func (p *Exporter) destroyDisks(ctx context.Context, vm pendingVM, restored map[string]restoredDisk) error {
 	var errs []error
+	var refs []string
 	for _, d := range vm.meta.Disks {
-		disk, ok := restored[vm.dir+"/"+d.VDIUUID]
-		if !ok {
-			continue
+		if disk, ok := restored[vm.dir+"/"+d.VDIUUID]; ok {
+			refs = append(refs, disk.ref)
 		}
-		if err := p.destroyVDI(ctx, disk.ref); err != nil {
-			errs = append(errs, fmt.Errorf("destroying restored VDI %s: %w", disk.ref, err))
+	}
+	failed := p.destroyVDIs(ctx, refs)
+	for _, ref := range refs {
+		if err := failed[ref]; err != nil {
+			errs = append(errs, fmt.Errorf("destroying restored VDI %s: %w", ref, err))
 		}
 	}
 	return errors.Join(errs...)
