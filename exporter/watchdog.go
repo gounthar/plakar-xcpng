@@ -44,17 +44,35 @@ func destroyedKey(method, ref string) string {
 // watch lists key with the watchdog, starting it on first use. Without a watchdog the
 // restore still runs: only the in-process cleanup then covers a failure.
 func (p *Exporter) watch(key string) {
+	if p.watchdogLost {
+		return
+	}
 	if p.watchdog == nil {
 		wd, err := watchdog.Start("restore watchdog", WatchdogArg, p.config)
 		if err != nil {
-			warnf("%s: a killed restore will leave %s behind", err, key)
+			p.loseWatchdog(err)
 			return
 		}
 		p.watchdog = wd
 	}
-	if err := p.watchdog.Add(key); err != nil {
+	err := p.watchdog.Add(key)
+	switch {
+	case errors.Is(err, watchdog.ErrKey):
 		warnf("%s: a killed restore will leave %s behind", err, key)
+	case err != nil:
+		p.loseWatchdog(err)
 	}
+}
+
+// loseWatchdog tells the user, once, what a kill would now leave, in terms they can
+// find in Xen Orchestra or with xe: once the watchdog is gone every later key would
+// fail the same way, and the keys are xapi references that mean nothing to them.
+// The restore itself goes on, its in-process cleanup unchanged.
+func (p *Exporter) loseWatchdog(err error) {
+	p.watchdogLost = true
+	warnf("the restore goes on, but if it is killed from here, what it has made and not finished stays on the pool, "+
+		"named by %[1]s: VMs whose other_config:%[2]s starts with it, and VDIs no VM uses whose name or description holds it (%[3]s)",
+		p.restoreID(), restoreMarkerKey, err)
 }
 
 func (p *Exporter) unwatch(key string) {

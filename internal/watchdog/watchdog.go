@@ -107,15 +107,21 @@ func (wd *Watchdog) send(line string) error {
 // the rest a protocol line of its own, listing or unlisting what the key never named.
 // They refuse a key too long for Read as well, which stops at such a line and would
 // lose every unlisting after it.
+//
+// A refused key is wrapped in ErrKey: the watchdog still runs, unlike after a failed
+// write.
 func (wd *Watchdog) Add(key string) error    { return wd.sendKey('+', key) }
 func (wd *Watchdog) Remove(key string) error { return wd.sendKey('-', key) }
 
+// ErrKey is a key Add or Remove refused.
+var ErrKey = errors.New("key refused")
+
 func (wd *Watchdog) sendKey(op byte, key string) error {
 	if strings.ContainsAny(key, "\r\n") {
-		return fmt.Errorf("%s: key %q holds a line break", wd.name, key)
+		return fmt.Errorf("%s: %w: %q holds a line break", wd.name, ErrKey, key)
 	}
 	if len(key) > maxKey {
-		return fmt.Errorf("%s: key of %d bytes is too long", wd.name, len(key))
+		return fmt.Errorf("%s: %w: %d bytes long", wd.name, ErrKey, len(key))
 	}
 	return wd.send(string(op) + key)
 }

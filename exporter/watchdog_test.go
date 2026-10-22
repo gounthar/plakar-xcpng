@@ -2,7 +2,9 @@ package exporter
 
 import (
 	"context"
-	"integration-xcpng/internal/xapi"
+	"errors"
+	"io"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"integration-xcpng/internal/watchdog"
+	"integration-xcpng/internal/xapi"
 )
 
 // recordWatchdog stands in for the watchdog child and records the protocol lines.
@@ -306,5 +309,93 @@ func TestInterruptedCleanupLeavesAHeldVDIToTheWatchdog(t *testing.T) {
 	}
 	if got := rec.pending(t); !slices.Equal(got, []string{"vdi/OpaqueRef:vdi0"}) {
 		t.Fatalf("listed %q, want the held VDI left to the watchdog", got)
+	}
+}
+
+// deadWatchdog stands in for a watchdog child that has exited: every write fails.
+type deadWatchdog struct{}
+
+func (deadWatchdog) Write([]byte) (int, error) { return 0, os.ErrClosed }
+func (deadWatchdog) Close() error              { return os.ErrClosed }
+
+// stderrOf returns what f writes to standard error.
+func stderrOf(t *testing.T, f func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Read as it is written: a warning longer than the pipe holds would block f.
+	read := make(chan []byte)
+	go func() {
+		out, _ := io.ReadAll(r)
+		read <- out
+	}()
+	saved := os.Stderr
+	os.Stderr = w
+	// A t.Fatal in f ends this goroutine without returning: put stderr back and
+	// end the reader all the same.
+	defer func() {
+		os.Stderr = saved
+		_ = w.Close()
+	}()
+	f()
+	os.Stderr = saved
+	_ = w.Close()
+	return string(<-read)
+}
+
+// A dead watchdog is said once, in terms a user can look for, not once per key with
+// the key's xapi reference: the restore's own ID, which every object it made carries.
+func TestLostWatchdogIsSaidOnce(t *testing.T) {
+	f := &restoreXAPI{}
+	p := restoreExporter(t, f)
+	p.watchdog = watchdog.FromWriter(deadWatchdog{})
+	var closeErr error
+	out := stderrOf(t, func() {
+		restored := restoreOneDisk(t, p)
+		if err := p.createVM(context.Background(), sbVM, restored, true); err != nil {
+			t.Fatal(err)
+		}
+		closeErr = p.Close(context.Background())
+	})
+	if n := strings.Count(out, "xcpng: warning: the restore goes on"); n != 1 {
+		t.Fatalf("said %d times:\n%s", n, out)
+	}
+	if strings.Contains(out, "OpaqueRef") {
+		t.Errorf("a warning names an xapi reference:\n%s", out)
+	}
+	id := p.restoreID()
+	if !strings.Contains(out, id) {
+		t.Errorf("the warning does not name restore %s:\n%s", id, out)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.vdiDescs) != 1 || !strings.Contains(f.vdiDescs[0], id) {
+		t.Errorf("VDI descriptions %q do not hold %s", f.vdiDescs, id)
+	}
+	for ref, m := range f.vmMarkers {
+		if ref != "OpaqueRef:samename" && !strings.HasPrefix(m, id+"-") {
+			t.Errorf("VM %s marked %q, not under %s", ref, m, id)
+		}
+	}
+	if errors.Is(closeErr, os.ErrClosed) {
+		t.Errorf("Close failed on the watchdog already reported: %v", closeErr)
+	}
+}
+
+// A key the watchdog refuses leaves it running: that key is named, the later ones are
+// still listed.
+func TestRefusedKeyKeepsTheWatchdog(t *testing.T) {
+	p, rec := recordedExporter(t, &restoreXAPI{})
+	out := stderrOf(t, func() {
+		p.watch("vdi/" + strings.Repeat("x", 1<<20))
+		p.watch(vdiKey("OpaqueRef:b"))
+	})
+	if p.watchdogLost || !strings.Contains(out, "key refused") {
+		t.Fatalf("lost=%v, said:\n%s", p.watchdogLost, out)
+	}
+	if got := rec.pending(t); !slices.Equal(got, []string{"vdi/OpaqueRef:b"}) {
+		t.Fatalf("listed %q", got)
 	}
 }
