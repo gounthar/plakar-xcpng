@@ -134,8 +134,7 @@ func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {
 	var busy []string
 	last := map[string]error{}
 	try := func(key string) {
-		// The cleanup calls retry past ctx (destroyRef runs them without its
-		// cancellation), so once the watchdog's time is up, name what is left instead.
+		// Once the watchdog's time is up, name what is left instead of trying it.
 		if err := ctx.Err(); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", key, err))
 			return
@@ -186,7 +185,12 @@ func (p *Exporter) destroyKey(ctx context.Context, key string) error {
 		if kind == "vm" {
 			method = "VM.destroy"
 		}
-		err := p.destroyRef(ctx, method, rest)
+		// destroyRef retries past ctx, so it is given only the watchdog's time left.
+		bound := cleanupRetry
+		if d, ok := ctx.Deadline(); ok {
+			bound = min(bound, time.Until(d))
+		}
+		err := p.destroyRef(ctx, bound, method, rest)
 		if xapi.IsCode(err, "HANDLE_INVALID") {
 			return errGone
 		}

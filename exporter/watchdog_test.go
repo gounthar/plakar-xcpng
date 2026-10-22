@@ -214,3 +214,20 @@ func TestAHeldVDIGoesOnceReleased(t *testing.T) {
 		t.Fatalf("destroyed %q with %d busy answers left", f.destroyed, f.heldFor["OpaqueRef:held"])
 	}
 }
+
+// A destroy started just before the watchdog's time is up, against a host that stopped
+// answering, must not retry past that time.
+func TestWatchdogRetryEndsWithItsTime(t *testing.T) {
+	f := &restoreXAPI{dropDestroy: true}
+	p := restoreExporter(t, f)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := p.destroyListed(ctx, []string{"vdi/OpaqueRef:a"})
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("destroyListed took %s past a 200ms deadline", took)
+	}
+	if err == nil || !strings.Contains(err.Error(), "vdi/OpaqueRef:a") {
+		t.Fatalf("error %v does not name the VDI left", err)
+	}
+}
