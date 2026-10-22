@@ -333,6 +333,12 @@ func stderrOf(t *testing.T, f func()) string {
 	}()
 	saved := os.Stderr
 	os.Stderr = w
+	// A t.Fatal in f ends this goroutine without returning: put stderr back and
+	// end the reader all the same.
+	defer func() {
+		os.Stderr = saved
+		_ = w.Close()
+	}()
 	f()
 	os.Stderr = saved
 	_ = w.Close()
