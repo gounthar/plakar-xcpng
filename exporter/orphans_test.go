@@ -114,8 +114,10 @@ type restoreXAPI struct {
 	// heldFor answers that many VDI.destroy calls of a ref with VDI_IN_USE, then lets
 	// it go.
 	heldFor map[string]int
-	// dropDestroy drops every VDI.destroy, as a host that stopped answering does.
+	// dropDestroy drops every VDI.destroy, as a host that stopped answering does;
+	// afterHeld does so once heldFor has run out, instead of destroying.
 	dropDestroy bool
+	afterHeld   bool
 }
 
 func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -222,6 +224,10 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if req.Method == "VDI.destroy" && f.heldFor[str(1)] > 0 {
 			f.heldFor[str(1)]--
 			xapiErr("VDI_IN_USE")
+			return
+		}
+		if req.Method == "VDI.destroy" && f.afterHeld {
+			drop()
 			return
 		}
 		if req.Method == "VDI.destroy" && f.inUse > 0 {

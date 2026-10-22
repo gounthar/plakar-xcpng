@@ -231,3 +231,17 @@ func TestWatchdogRetryEndsWithItsTime(t *testing.T) {
 		t.Fatalf("error %v does not name the VDI left", err)
 	}
 }
+
+// A held VDI whose last try is cut by the watchdog's time is still reported as held.
+func TestCutTryKeepsTheBusyReason(t *testing.T) {
+	f := &restoreXAPI{heldFor: map[string]int{"OpaqueRef:a": 1}}
+	p := restoreExporter(t, f)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	// The first try is answered VDI_IN_USE; every try after it goes unanswered.
+	f.afterHeld = true
+	err := p.destroyListed(ctx, []string{"vdi/OpaqueRef:a"})
+	if err == nil || !strings.Contains(err.Error(), "VDI_IN_USE") {
+		t.Fatalf("error %v does not say the VDI was held", err)
+	}
+}

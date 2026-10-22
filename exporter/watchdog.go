@@ -145,7 +145,9 @@ func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {
 			last[key] = err
 		case errors.Is(err, errGone):
 		case err != nil:
-			errs = append(errs, fmt.Errorf("%s: %w", key, err))
+			// A try cut short by the watchdog's time says nothing of why the key was
+			// put aside, so the busy answer before it is kept.
+			errs = append(errs, fmt.Errorf("%s: %w", key, errors.Join(last[key], err)))
 		default:
 			fmt.Fprintf(os.Stderr, "xcpng: cleaned up %s left by an interrupted restore\n", key)
 		}
