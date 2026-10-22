@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -83,18 +84,19 @@ func TestCheckDiskSizesDestroysDisksWhenInterrupted(t *testing.T) {
 // refuse*, the call fails with a xapi error and creates nothing. The SR reports a
 // vdi_create operation on the first busyLooks reads of its current operations.
 type restoreXAPI struct {
-	mu         sync.Mutex
-	dropVDI    bool
-	refuseVDI  bool
-	dropVM     bool
-	busyLooks  int
-	vdiLabels  map[string]string // ref -> name_label
-	vmMarkers  map[string]string // ref -> other_config marker
-	vdiDescs   []string          // name_description of each VDI.create
-	destroyed  []string          // VDIs and VMs, in order
-	unmarked   []string
-	lookups    int // VDI.get_by_name_label and VM.get_by_name_label calls
-	srOpsReads int
+	mu           sync.Mutex
+	dropVDI      bool
+	refuseVDI    bool
+	dropVM       bool
+	busyLooks    int
+	vdiLabels    map[string]string // ref -> name_label
+	vmMarkers    map[string]string // ref -> other_config marker
+	vdiDescs     []string          // name_description of each VDI.create
+	destroyed    []string          // VDIs and VMs, in order
+	unmarked     []string
+	unmarkedAtSB int // len(unmarked) when the Secure Boot checks began
+	lookups      int // VDI.get_by_name_label and VM.get_by_name_label calls
+	srOpsReads   int
 	// dropSB drops VM.get_secureboot_certificates_state. sbReadiness, when set, is the
 	// VM's Secure Boot readiness, on a pool whose own readiness is not_ready.
 	dropSB      bool
@@ -276,6 +278,7 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "VM.remove_from_other_config":
 		f.unmarked = append(f.unmarked, str(1)+" "+str(2))
 	case "VM.get_secureboot_certificates_state":
+		f.unmarkedAtSB = len(f.unmarked)
 		if f.dropSB || f.dropSBOnce {
 			f.dropSBOnce = false
 			drop()
@@ -374,14 +377,23 @@ func TestUnansweredVMCreateIsDestroyed(t *testing.T) {
 }
 
 func TestRestoredVMLosesItsMarker(t *testing.T) {
-	f := &restoreXAPI{}
-	p := restoreExporter(t, f)
+	// The marker comes off only once the VM is kept, held or not: during the Secure
+	// Boot checks a killed restore with no watchdog leaves a VM only the marker names.
+	for _, readiness := range []string{"", "first_boot"} {
+		f := &restoreXAPI{sbReadiness: readiness}
+		p := restoreExporter(t, f)
 
-	if err := p.createVM(context.Background(), markerVM, nil, true); err != nil {
-		t.Fatal(err)
-	}
-	if len(f.unmarked) != 1 || f.unmarked[0] != "OpaqueRef:vm1 "+restoreMarkerKey {
-		t.Fatalf("other_config removals %v, want the marker of OpaqueRef:vm1", f.unmarked)
+		err := p.createVM(context.Background(), markerVM, nil, true)
+		var held *heldError
+		if err != nil && !errors.As(err, &held) {
+			t.Fatalf("readiness %q: %v", readiness, err)
+		}
+		if len(f.unmarked) != 1 || f.unmarked[0] != "OpaqueRef:vm1 "+restoreMarkerKey {
+			t.Fatalf("readiness %q: other_config removals %v, want the marker of OpaqueRef:vm1", readiness, f.unmarked)
+		}
+		if f.unmarkedAtSB != 0 {
+			t.Fatalf("readiness %q: marker removed before the Secure Boot checks", readiness)
+		}
 	}
 }
 

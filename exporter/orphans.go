@@ -20,7 +20,7 @@ import (
 // restore, so the object can be found again and destroyed.
 
 // restoreMarkerKey is the other_config key holding a restored VM's label until the
-// VM is fully made: the VM keeps its own name, so the name cannot carry it.
+// VM is kept: the VM keeps its own name, so the name cannot carry it.
 const restoreMarkerKey = "plakar_restore"
 
 // restoreWait bounds the wait for a VDI.create xapi is still running on the SR.

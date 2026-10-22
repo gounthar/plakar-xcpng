@@ -454,8 +454,12 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 		return errors.Join(err, p.destroyVM(ctx, vmRef), p.destroyDisks(ctx, vm, restored))
 	}
 	labPause("attached")
-	if err := p.client.Call(ctx, nil, "VM.remove_from_other_config", vmRef, restoreMarkerKey); err != nil {
-		warnf("VM %q: removing other_config:%s: %s", name, restoreMarkerKey, err)
+	// The marker stays until the VM is kept: a restore killed before that, with no
+	// watchdog left, leaves a VM that only the marker names (see loseWatchdog).
+	unmark := func() {
+		if err := p.client.Call(ctx, nil, "VM.remove_from_other_config", vmRef, restoreMarkerKey); err != nil {
+			warnf("VM %q: removing other_config:%s: %s", name, restoreMarkerKey, err)
+		}
 	}
 
 	// XAPI copies never carry a unique vTPM's state; a restore does, by design.
@@ -472,6 +476,7 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 		if errors.As(err, &held) {
 			p.keep(vmRef, vm, restored)
 			labPause("kept")
+			unmark()
 			return err
 		}
 		// A VM whose Secure Boot state was not checked is not restored.
@@ -480,6 +485,7 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 	// Kept from here, started or not: a VM.start that fails holds it back.
 	p.keep(vmRef, vm, restored)
 	labPause("kept")
+	unmark()
 
 	if p.opts.startOnRestore {
 		if err := p.client.Call(ctx, nil, "VM.start", vmRef, false, false); err != nil {
