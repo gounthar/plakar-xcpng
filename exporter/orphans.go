@@ -124,24 +124,43 @@ func heldByXapi(err error) bool {
 	return xapi.IsCode(err, "VDI_IN_USE") || xapi.IsCode(err, "OTHER_OPERATION_IN_PROGRESS")
 }
 
-// destroyVDI is destroyRef for the restore's own cleanup of a VDI: while xapi holds
-// the VDI, it is tried again every restorePollDelay for up to restoreWait. Left to the
-// watchdog instead, it would be reported as left by an interrupted restore. Once ctx
-// is done the waiting stops, the VDI stays listed, and the watchdog destroys it when
-// the plugin exits: an interrupted restore must not hold up its exit for it.
-func (p *Exporter) destroyVDI(ctx context.Context, ref string) error {
-	deadline := time.Now().Add(restoreWait)
-	for {
-		err := p.destroyRef(ctx, cleanupRetry, "VDI.destroy", ref)
-		if !heldByXapi(err) || !time.Now().Before(deadline) {
-			return err
+// heldWait bounds how long the restore's own cleanup waits for xapi to let go of the
+// VDIs it holds, all of them together: the watchdog destroys any still held when the
+// plugin exits, so the failing record need not wait for it.
+var heldWait = 3 * time.Minute
+
+// destroyVDIs is destroyRef for the restore's own cleanup of VDIs. Each is tried once,
+// then those xapi still holds are tried again together every restorePollDelay until
+// heldWait runs out, so several held disks cost one wait, not one each. Left to the
+// watchdog instead, a VDI would be reported as left by an interrupted restore. Once ctx
+// is done the waiting stops, the held VDIs stay listed, and the watchdog destroys them
+// when the plugin exits: an interrupted restore must not hold up its exit for them.
+// It returns the error of each VDI not destroyed.
+func (p *Exporter) destroyVDIs(ctx context.Context, refs []string) map[string]error {
+	errs := map[string]error{}
+	try := func(refs []string) (held []string) {
+		for _, ref := range refs {
+			err := p.destroyRef(ctx, cleanupRetry, "VDI.destroy", ref)
+			if err == nil {
+				delete(errs, ref)
+				continue
+			}
+			errs[ref] = err
+			if heldByXapi(err) {
+				held = append(held, ref)
+			}
 		}
+		return held
+	}
+	deadline := time.Now().Add(heldWait)
+	for held := try(refs); len(held) > 0 && time.Now().Before(deadline); held = try(held) {
 		select {
 		case <-ctx.Done():
-			return err
+			return errs
 		case <-time.After(restorePollDelay):
 		}
 	}
+	return errs
 }
 
 // destroyLabelledVDI destroys the VDIs of the SR named label, once xapi has finished

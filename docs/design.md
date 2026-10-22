@@ -281,8 +281,8 @@ back, before `VM.start`. If the pipe closes while something is listed, the watch
 destroys the VMs first, then the VDIs, with the same label searches and retries as
 above. A cleanup that fails while the exporter is alive leaves its object listed, so the
 watchdog tries it once more when the exporter exits. A VDI xapi still holds (`VDI_IN_USE`,
-as after an import whose connection was cut) is retried by the exporter itself for up to
-10 minutes, unless the restore was interrupted: then it is left to the watchdog. What a killed watchdog, or a
+as after an import whose connection was cut) is retried by the exporter itself, all of a VM's held disks together, for up to
+3 minutes; what is still held then, or held when the restore was interrupted, is left to the watchdog. What a killed watchdog, or a
 machine that loses power, leaves behind is named by the label or by the disk's file
 name (`<n>-<VDI UUID>.raw`).
 

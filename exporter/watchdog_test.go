@@ -2,6 +2,7 @@ package exporter
 
 import (
 	"context"
+	"integration-xcpng/internal/xapi"
 	"slices"
 	"strings"
 	"sync"
@@ -262,6 +263,27 @@ func TestInProcessCleanupWaitsForAHeldVDI(t *testing.T) {
 	}
 	if got := rec.pending(t); len(got) != 0 {
 		t.Fatalf("left %q listed for the watchdog", got)
+	}
+}
+
+// A VM's held disks share one wait: three held for good cost one heldWait, not three.
+func TestHeldDisksShareOneWait(t *testing.T) {
+	old, oldRestore := heldWait, restoreWait
+	heldWait, restoreWait = 300*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() { heldWait, restoreWait = old, oldRestore })
+	f := &restoreXAPI{held: map[string]bool{"OpaqueRef:a": true, "OpaqueRef:b": true, "OpaqueRef:c": true}}
+	p := restoreExporter(t, f)
+	vm := pendingVM{dir: "/vm", meta: xapi.VMMeta{Disks: []xapi.DiskMeta{{VDIUUID: "a"}, {VDIUUID: "b"}, {VDIUUID: "c"}}}}
+	restored := map[string]restoredDisk{"/vm/a": {ref: "OpaqueRef:a"}, "/vm/b": {ref: "OpaqueRef:b"}, "/vm/c": {ref: "OpaqueRef:c"}}
+	start := time.Now()
+	err := p.destroyDisks(context.Background(), vm, restored)
+	if took := time.Since(start); took > 750*time.Millisecond {
+		t.Fatalf("three held disks took %s, want about one heldWait (%s)", took, heldWait)
+	}
+	for _, ref := range []string{"OpaqueRef:a", "OpaqueRef:b", "OpaqueRef:c"} {
+		if err == nil || !strings.Contains(err.Error(), ref+": ") {
+			t.Fatalf("error %v does not name %s", err, ref)
+		}
 	}
 }
 
