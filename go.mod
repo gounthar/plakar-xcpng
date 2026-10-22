@@ -2,7 +2,7 @@ module integration-xcpng
 
 go 1.26.0
 
-toolchain go1.26.9
+toolchain go1.26.10
 
 require (
 	github.com/PlakarKorp/go-kloset-sdk v1.2.0-alpha.5
