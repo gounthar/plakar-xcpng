@@ -140,7 +140,7 @@ func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {
 			return
 		}
 		switch err := p.destroyKey(ctx, key); {
-		case xapi.IsCode(err, "VDI_IN_USE") || xapi.IsCode(err, "OTHER_OPERATION_IN_PROGRESS"):
+		case heldByXapi(err):
 			busy = append(busy, key)
 			last[key] = err
 		case errors.Is(err, errGone):

@@ -213,7 +213,7 @@ func (p *Exporter) Export(ctx context.Context, records <-chan *connectors.Record
 			err = fmt.Errorf("no %s in the restore for this disk, so no VM to attach it to: its VDI was destroyed", xapi.MetaFilename)
 		}
 		if err != nil && !owned[d.key] {
-			if derr := p.destroyRef(ctx, cleanupRetry, "VDI.destroy", d.ref); derr != nil {
+			if derr := p.destroyVDI(ctx, d.ref); derr != nil {
 				err = fmt.Errorf("%w; destroying VDI %s failed: %w", err, d.ref, derr)
 			}
 		}
@@ -662,7 +662,7 @@ func (p *Exporter) destroyDisks(ctx context.Context, vm pendingVM, restored map[
 		if !ok {
 			continue
 		}
-		if err := p.destroyRef(ctx, cleanupRetry, "VDI.destroy", disk.ref); err != nil {
+		if err := p.destroyVDI(ctx, disk.ref); err != nil {
 			errs = append(errs, fmt.Errorf("destroying restored VDI %s: %w", disk.ref, err))
 		}
 	}
