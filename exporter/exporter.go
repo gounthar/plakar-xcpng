@@ -46,6 +46,9 @@ type Exporter struct {
 	// config is kept for the restore watchdog, started at the first create.
 	config   map[string]string
 	watchdog *watchdog.Watchdog
+	// watchdogLost is set once the watchdog could not be started or stopped taking
+	// keys: the user is told once, and it is not tried again.
+	watchdogLost bool
 }
 
 func NewExporter(ctx context.Context, opts *connectors.Options, name string, config map[string]string) (exporter.Exporter, error) {
@@ -97,7 +100,10 @@ func (p *Exporter) Ping(ctx context.Context) error {
 func (p *Exporter) Close(ctx context.Context) error {
 	var errs []error
 	if p.watchdog != nil {
-		errs = append(errs, p.watchdog.Close())
+		// A lost watchdog was reported when it went: closing it only fails again.
+		if err := p.watchdog.Close(); !p.watchdogLost {
+			errs = append(errs, err)
+		}
 		p.watchdog = nil
 	}
 	errs = append(errs, p.client.Close(ctx))
