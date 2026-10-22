@@ -99,11 +99,13 @@ func (p *Exporter) retry(ctx context.Context, bound time.Duration, fn func(ctx c
 	}
 }
 
-// destroyRef destroys a VDI or a VM, retrying while xapi does not answer, and unlists
-// it from the watchdog. A handle gone on a retry was destroyed by an earlier try whose
-// answer was lost.
-func (p *Exporter) destroyRef(ctx context.Context, method, ref string) error {
-	err := p.retry(context.WithoutCancel(ctx), cleanupRetry, func(ctx context.Context, attempt int) error {
+// destroyRef destroys a VDI or a VM, retrying for up to bound while xapi does not
+// answer, and unlists it from the watchdog. A handle gone on a retry was destroyed by
+// an earlier try whose answer was lost. The retries outlive ctx, which an interrupt
+// cancels before the cleanup runs, so a caller with a deadline of its own passes the
+// time left as bound.
+func (p *Exporter) destroyRef(ctx context.Context, bound time.Duration, method, ref string) error {
+	err := p.retry(context.WithoutCancel(ctx), bound, func(ctx context.Context, attempt int) error {
 		err := p.client.Call(ctx, nil, method, ref)
 		if attempt > 0 && xapi.IsCode(err, "HANDLE_INVALID") {
 			return nil

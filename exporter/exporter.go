@@ -213,7 +213,7 @@ func (p *Exporter) Export(ctx context.Context, records <-chan *connectors.Record
 			err = fmt.Errorf("no %s in the restore for this disk, so no VM to attach it to: its VDI was destroyed", xapi.MetaFilename)
 		}
 		if err != nil && !owned[d.key] {
-			if derr := p.destroyRef(ctx, "VDI.destroy", d.ref); derr != nil {
+			if derr := p.destroyRef(ctx, cleanupRetry, "VDI.destroy", d.ref); derr != nil {
 				err = fmt.Errorf("%w; destroying VDI %s failed: %w", err, d.ref, derr)
 			}
 		}
@@ -545,7 +545,7 @@ func (e *heldError) Unwrap() error { return e.error }
 // destroyVM destroys a VM the restore made, even when ctx is done. VM.destroy
 // removes the VM's VBDs but not their VDIs (xapi_vm_helpers.ml, destroy).
 func (p *Exporter) destroyVM(ctx context.Context, vmRef string) error {
-	return p.destroyRef(ctx, "VM.destroy", vmRef)
+	return p.destroyRef(ctx, cleanupRetry, "VM.destroy", vmRef)
 }
 
 // poolSecureBootGap says why the target pool cannot give a first-booting VM its Secure
@@ -662,7 +662,7 @@ func (p *Exporter) destroyDisks(ctx context.Context, vm pendingVM, restored map[
 		if !ok {
 			continue
 		}
-		if err := p.destroyRef(ctx, "VDI.destroy", disk.ref); err != nil {
+		if err := p.destroyRef(ctx, cleanupRetry, "VDI.destroy", disk.ref); err != nil {
 			errs = append(errs, fmt.Errorf("destroying restored VDI %s: %w", disk.ref, err))
 		}
 	}
