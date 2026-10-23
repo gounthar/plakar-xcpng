@@ -92,6 +92,8 @@ type restoreXAPI struct {
 	vdiLabels    map[string]string // ref -> name_label
 	vmMarkers    map[string]string // ref -> other_config marker
 	vdiDescs     []string          // name_description of each VDI.create
+	vdiDesc      map[string]string // ref -> current name_description
+	vbds         map[string]string // VDI ref -> VM ref, from VBD.create
 	destroyed    []string          // VDIs and VMs, in order
 	unmarked     []string
 	unmarkedAtSB int // len(unmarked) when the Secure Boot checks began
@@ -187,8 +189,10 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ref := fmt.Sprintf("OpaqueRef:vdi%d", len(f.vdiLabels))
 		if f.vdiLabels == nil {
 			f.vdiLabels = map[string]string{}
+			f.vdiDesc = map[string]string{}
 		}
 		f.vdiLabels[ref] = rec.NameLabel
+		f.vdiDesc[ref] = rec.NameDescription
 		if f.dropVDI {
 			drop()
 			return
@@ -246,7 +250,21 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.vdiLabels = map[string]string{}
 		}
 		f.vdiLabels[str(1)] = str(2)
-	case "VDI.set_name_description", "VBD.create":
+	case "VDI.set_name_description":
+		if f.vdiDesc == nil {
+			f.vdiDesc = map[string]string{}
+		}
+		f.vdiDesc[str(1)] = str(2)
+	case "VBD.create":
+		var rec struct {
+			VM  string `json:"VM"`
+			VDI string `json:"VDI"`
+		}
+		_ = json.Unmarshal(req.Params[1], &rec)
+		if f.vbds == nil {
+			f.vbds = map[string]string{}
+		}
+		f.vbds[rec.VDI] = rec.VM
 	case "VM.create":
 		if f.refuseVM {
 			xapiErr("INTERNAL_ERROR")
