@@ -85,6 +85,7 @@ func TestKillAtPausePoints(t *testing.T) {
 		kept      bool
 	}{
 		{"vm-created", "", false},
+		{"vbd-created", "", false},
 		{"attached", "", false},
 		{"secureboot", "", false},
 		{"secureboot", "first_boot", false},
@@ -105,6 +106,13 @@ func TestKillAtPausePoints(t *testing.T) {
 				restored := restoreOneDisk(t, p)
 				if !killAt(t, p, tc.phase, restored) {
 					t.Fatalf("createVM never reached %s", tc.phase)
+				}
+
+				f.mu.Lock()
+				lostID := f.lostID
+				f.mu.Unlock()
+				if len(lostID) != 0 {
+					t.Fatalf("%q renamed out of the restore ID before a VBD held it", lostID)
 				}
 
 				vms, vdis := f.leftovers()

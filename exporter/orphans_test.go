@@ -94,6 +94,7 @@ type restoreXAPI struct {
 	vdiDescs     []string          // name_description of each VDI.create
 	vdiDesc      map[string]string // ref -> current name_description
 	vbds         map[string]string // VDI ref -> VM ref, from VBD.create
+	lostID       []string          // VDIs renamed out of the restore ID while no VBD held them
 	destroyed    []string          // VDIs and VMs, in order
 	unmarked     []string
 	unmarkedAtSB int // len(unmarked) when the Secure Boot checks began
@@ -123,6 +124,18 @@ type restoreXAPI struct {
 	// afterHeld does so once heldFor has run out, instead of destroying.
 	dropDestroy bool
 	afterHeld   bool
+}
+
+// checkID records ref when a rename leaves it with no restore ID in its name or
+// description while no VBD holds it: killed then, with the watchdog lost, nothing
+// leads to it. Called with f.mu held.
+func (f *restoreXAPI) checkID(ref string) {
+	if _, ok := f.vbds[ref]; ok {
+		return
+	}
+	if !strings.Contains(f.vdiLabels[ref], "plakar-restore-") && !strings.Contains(f.vdiDesc[ref], "plakar-restore-") {
+		f.lostID = append(f.lostID, ref)
+	}
 }
 
 func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -250,11 +263,13 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.vdiLabels = map[string]string{}
 		}
 		f.vdiLabels[str(1)] = str(2)
+		f.checkID(str(1))
 	case "VDI.set_name_description":
 		if f.vdiDesc == nil {
 			f.vdiDesc = map[string]string{}
 		}
 		f.vdiDesc[str(1)] = str(2)
+		f.checkID(str(1))
 	case "VBD.create":
 		var rec struct {
 			VM  string `json:"VM"`
