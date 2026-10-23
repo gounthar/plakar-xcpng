@@ -702,12 +702,6 @@ func (p *Exporter) attach(ctx context.Context, vmRef string, vm pendingVM, resto
 		if !ok {
 			return fmt.Errorf("disk %s of %s was not restored", d.File, vm.dir)
 		}
-		if err := p.client.Call(ctx, nil, "VDI.set_name_label", vdiRef, d.NameLabel); err != nil {
-			return err
-		}
-		if err := p.client.Call(ctx, nil, "VDI.set_name_description", vdiRef, d.NameDescription); err != nil {
-			return err
-		}
 		err := p.client.Call(ctx, nil, "VBD.create", map[string]any{
 			"VM":                   vmRef,
 			"VDI":                  vdiRef,
@@ -722,6 +716,15 @@ func (p *Exporter) attach(ctx context.Context, vmRef string, vm pendingVM, resto
 			"qos_algorithm_params": map[string]string{},
 		})
 		if err != nil {
+			return err
+		}
+		// Renamed only once attached: until then the restore ID in its description is
+		// what finds it after a kill with no watchdog left (see loseWatchdog).
+		labPause("vbd-created")
+		if err := p.client.Call(ctx, nil, "VDI.set_name_label", vdiRef, d.NameLabel); err != nil {
+			return err
+		}
+		if err := p.client.Call(ctx, nil, "VDI.set_name_description", vdiRef, d.NameDescription); err != nil {
 			return err
 		}
 	}

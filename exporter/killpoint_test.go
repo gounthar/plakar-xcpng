@@ -85,6 +85,7 @@ func TestKillAtPausePoints(t *testing.T) {
 		kept      bool
 	}{
 		{"vm-created", "", false},
+		{"vbd-created", "", false},
 		{"attached", "", false},
 		{"secureboot", "", false},
 		{"secureboot", "first_boot", false},
