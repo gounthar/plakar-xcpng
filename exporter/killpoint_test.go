@@ -108,6 +108,13 @@ func TestKillAtPausePoints(t *testing.T) {
 					t.Fatalf("createVM never reached %s", tc.phase)
 				}
 
+				f.mu.Lock()
+				lostID := f.lostID
+				f.mu.Unlock()
+				if len(lostID) != 0 {
+					t.Fatalf("%q renamed out of the restore ID before a VBD held it", lostID)
+				}
+
 				vms, vdis := f.leftovers()
 				if len(vms) != 1 || len(vdis) != 1 {
 					t.Fatalf("left VMs %q and VDIs %q, want one of each", vms, vdis)
