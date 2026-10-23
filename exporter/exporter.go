@@ -350,6 +350,7 @@ func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, n
 		p.unwatch(key)
 		return restoredDisk{}, err
 	}
+	labPause("vdi-created")
 	p.watch(vdiKey(ref))
 	p.unwatch(key)
 	// The label was needed only while the create had not answered. attach gives the
@@ -358,6 +359,7 @@ func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, n
 	if err := p.client.Call(ctx, nil, "VDI.set_name_label", ref, name); err != nil {
 		warnf("disk %s: restored as VDI %q, renaming it failed: %s", name, label, err)
 	}
+	labPause("vdi-renamed")
 
 	if sparse {
 		_, err = p.client.ImportSparseVDI(ctx, ref, size, r)
@@ -372,6 +374,7 @@ func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, n
 		}
 		return restoredDisk{}, err
 	}
+	labPause("vdi-imported")
 	disk := restoredDisk{ref: ref, size: size, stored: record.FileInfo.Lsize, kept: size}
 	if tail != nil {
 		disk.kept, disk.cut, disk.dropped = tail.kept, tail.cut, tail.dropped()

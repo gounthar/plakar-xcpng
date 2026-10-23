@@ -13,7 +13,14 @@ type killed struct{}
 
 // killAt runs createVM until it reaches phase and stops it there. It reports whether
 // the phase was reached.
-func killAt(t *testing.T, p *Exporter, phase string, restored map[string]restoredDisk) (reached bool) {
+func killAt(t *testing.T, p *Exporter, phase string, restored map[string]restoredDisk) bool {
+	t.Helper()
+	return stopAt(t, phase, func() { _ = p.createVM(context.Background(), sbVM, restored, true) })
+}
+
+// stopAt runs restore until it reaches phase and stops it there. It reports whether the
+// phase was reached.
+func stopAt(t *testing.T, phase string, restore func()) (reached bool) {
 	t.Helper()
 	old := labPause
 	labPause = func(at string) {
@@ -30,7 +37,7 @@ func killAt(t *testing.T, p *Exporter, phase string, restored map[string]restore
 			reached = true
 		}
 	}()
-	_ = p.createVM(context.Background(), sbVM, restored, true)
+	restore()
 	return false
 }
 
@@ -135,6 +142,47 @@ func TestKillAtPausePoints(t *testing.T) {
 					if !lost && !slices.Contains(pending, vmKey(ref)) && !slices.Contains(pending, vdiKey(ref)) && !slices.Contains(pending, byLabel) {
 						t.Errorf("%s: not listed with the watchdog (%q)", ref, pending)
 					}
+				}
+			})
+		}
+	}
+}
+
+// The same, for a restore killed while its disk is being written: the one VDI it made is
+// listed with the watchdog, by its label until VDI.create has answered, or findable.
+func TestKillInsideRestoreDisk(t *testing.T) {
+	for _, phase := range []string{"vdi-created", "vdi-renamed", "vdi-imported"} {
+		for _, lost := range []bool{false, true} {
+			name := phase
+			if lost {
+				name += "/lost"
+			}
+			t.Run(name, func(t *testing.T) {
+				f := &restoreXAPI{}
+				p, rec := recordedExporter(t, f)
+				if lost {
+					p.watchdog, p.watchdogLost = nil, true
+				}
+				if !stopAt(t, phase, func() { restoreOneDisk(t, p) }) {
+					t.Fatalf("restoreDisk never reached %s", phase)
+				}
+
+				vms, vdis := f.leftovers()
+				if len(vms) != 0 || len(vdis) != 1 {
+					t.Fatalf("left VMs %q and VDIs %q, want one VDI", vms, vdis)
+				}
+				ref := vdis[0]
+				if lost {
+					if !f.findable(p.restoreID(), ref) {
+						t.Errorf("%s: the lost-watchdog warning does not lead to it", ref)
+					}
+					return
+				}
+				f.mu.Lock()
+				byLabel := vdiLabelKey("OpaqueRef:sr", f.vdiLabels[ref])
+				f.mu.Unlock()
+				if pending := rec.pending(t); !slices.Contains(pending, vdiKey(ref)) && !slices.Contains(pending, byLabel) {
+					t.Errorf("%s: not listed with the watchdog (%q)", ref, pending)
 				}
 			})
 		}
