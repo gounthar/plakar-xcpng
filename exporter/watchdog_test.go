@@ -453,6 +453,38 @@ func TestLostWatchdogIsSaidOnce(t *testing.T) {
 	}
 }
 
+// Starting the watchdog says the restore ID once, with where to look, before the first
+// create: if the watchdog is killed after Ctrl-C has ended the plugin, nothing is left
+// to say it (#56).
+func TestRestoreIDIsSaidWhenTheWatchdogStarts(t *testing.T) {
+	f := &restoreXAPI{}
+	createsBefore := -1
+	old := startWatchdog
+	startWatchdog = func(string, string, map[string]string) (*watchdog.Watchdog, error) {
+		f.mu.Lock()
+		createsBefore = len(f.vdiDescs)
+		f.mu.Unlock()
+		return watchdog.FromWriter(&recordWatchdog{}), nil
+	}
+	t.Cleanup(func() { startWatchdog = old })
+	p := restoreExporter(t, f)
+	p.watchdog = nil
+	out := stderrOf(t, func() {
+		restoreOneDisk(t, p)
+		p.watch(vdiKey("OpaqueRef:b"))
+	})
+	if createsBefore != 0 {
+		t.Fatalf("watchdog started after %d VDI.create calls", createsBefore)
+	}
+	said := "xcpng: restore " + p.restoreID() + ":"
+	if n := strings.Count(out, said); n != 1 {
+		t.Fatalf("%q said %d times:\n%s", said, n, out)
+	}
+	if !strings.Contains(out, "other_config:"+restoreMarkerKey) || strings.Contains(out, "warning") {
+		t.Errorf("not where to look, or said as a warning:\n%s", out)
+	}
+}
+
 // A key the watchdog refuses leaves it running: that key is named, the later ones are
 // still listed.
 func TestRefusedKeyKeepsTheWatchdog(t *testing.T) {

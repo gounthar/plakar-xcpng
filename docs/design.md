@@ -291,7 +291,11 @@ watchdog tries it once more when the exporter exits. A VDI xapi still holds (`VD
 as after an import whose connection was cut) is retried by the exporter itself, all of a VM's held disks together, for up to
 3 minutes; what is still held then, or held when the restore was interrupted, is left to the watchdog. What a killed watchdog, or a
 machine that loses power, leaves behind is named by the label or by the disk's file
-name (`<n>-<VDI UUID>.raw`).
+name (`<n>-<VDI UUID>.raw`). Starting the watchdog prints the restore ID,
+`plakar-restore-<time>-<random>`, which every label starts with and every restored VDI's
+description holds. It has to be said then: Ctrl-C ends the exporter at once, since it is in
+plakar's process group, so once the watchdog is killed too, no process is left to say it
+(#56: disk 0 left, nothing printed).
 
 The restored VM is always a new VM. The prototype never overwrites an existing one.
 
