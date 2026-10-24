@@ -675,6 +675,7 @@ func (p *Importer) destroyStaleSnapshots(ctx context.Context, vmRef string) erro
 	}
 	var errs []error
 	var now time.Time
+	var busy *bool // whether the VM shows a snapshot operation, asked once
 	for _, snap := range snaps {
 		var s snapshotSummary
 		if err := p.client.Call(ctx, &s, "VM.get_record", snap); err != nil {
@@ -697,6 +698,22 @@ func (p *Importer) destroyStaleSnapshots(ctx context.Context, vmRef string) erro
 		}
 		if now.Sub(t) < p.staleAge {
 			continue
+		}
+		// xapi names a snapshot before it has finished taking it, and the marker comes
+		// only after VM.snapshot answers: while the VM shows a snapshot operation, an
+		// unmarked snapshot may be another backup's, still being taken.
+		if _, marked := s.OtherConfig[snapshotMarker]; !marked {
+			if busy == nil {
+				b, err := p.snapshotting(ctx, vmRef)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("stale snapshot %s: %w", s.UUID, err))
+					continue
+				}
+				busy = &b
+			}
+			if *busy {
+				continue
+			}
 		}
 		// A backup that runs longer than staleAge is still reading its snapshot.
 		inUse, err := p.snapshotInUse(ctx, snap)

@@ -176,8 +176,11 @@ takes a snapshot with no marker key at all too, when its name is exactly a label
 below, `plakar-<YYYYMMDDTHHMMSSZ>-<8 lowercase hex>`: that is what is left when the plugin
 and its watchdog are both killed while `VM.snapshot` runs, so the marker was never set.
 Any other unmarked snapshot is left alone, and so is one whose marker holds another UUID,
-whatever its name. The risk taken is a snapshot someone else named exactly like that, on a
-VM this connector backs up. The age threshold exists because two backups of the same VM can
+whatever its name. xapi names a snapshot before it has finished taking it, so while the VM
+shows a snapshot operation, which may be another backup's still in `VM.snapshot`, the sweep
+leaves unmarked snapshots for the next backup. The risk taken is a snapshot someone else
+named exactly like that, on a VM this connector backs up, or one of ours that a user kept
+and removed the marker from without renaming it: renaming it keeps it. The age threshold exists because two backups of the same VM can
 overlap; it has to be longer than the longest backup of one VM. The age is measured on the
 pool master's clock (`host.get_servertime`), which stamped `snapshot_time`, so a plakar host
 whose clock is off cannot sweep a fresh snapshot or keep an old one. A marked snapshot with a

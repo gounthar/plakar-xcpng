@@ -463,6 +463,22 @@ func TestSweepLeavesForeignMarkerAlone(t *testing.T) {
 	}
 }
 
+// xapi names a snapshot before it has finished taking it, and the marker comes only once
+// VM.snapshot has answered: while another backup of the same VM is still in
+// VM.snapshot, its snapshot looks like one left unmarked. The sweep leaves unmarked
+// snapshots alone while the VM shows a snapshot operation.
+func TestSweepLeavesUnmarkedSnapshotDuringASnapshot(t *testing.T) {
+	f := &snapshotXAPI{unmarked: "plakar-20261001T000000Z-0a1b2c3d", inProgress: 1, recordEarly: true}
+	p := dialFake(t, f)
+	p.staleAge = time.Hour
+	if err := p.destroyStaleSnapshots(context.Background(), "OpaqueRef:vm"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("calls = %q, want none", f.calls)
+	}
+}
+
 // A backup that runs longer than stale_snapshot_age is still exporting its snapshot.
 // Another backup of the same VM must leave it alone: xapi refuses VDI.destroy on the
 // attached disk, and the sweep used to retry that for two minutes, then fail the
