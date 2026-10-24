@@ -43,7 +43,8 @@ The importer waits up to three minutes for xapi through a toolstack restart, and
 process removes the snapshot if plakar is interrupted. A snapshot can still be left behind
 if the machine running plakar loses power or the watchdog is killed, or if xapi refuses to
 destroy it; the next backup of the same VM removes marked snapshots older than
-`stale_snapshot_age` (default `24h`, `0` disables). A complete backup whose cleanup failed
+`stale_snapshot_age` (default `24h`, `0` disables), and unmarked ones whose name is exactly
+`plakar-<time>-<random>`, which is what a watchdog killed during the snapshot leaves. A complete backup whose cleanup failed
 is kept, with a warning naming the snapshot. Details in `docs/design.md`.
 
 If plakar runs as a systemd service, give the watchdog time to finish when the service
@@ -60,6 +61,12 @@ same VM sweeps it once it is older than `stale_snapshot_age`. To list what the c
 
 ```sh
 xe snapshot-list params=uuid,name-label,snapshot-time,other-config | grep -B3 plakar_xcpng_snapshot
+```
+
+and the unmarked ones the sweep also takes:
+
+```sh
+xe snapshot-list params=uuid,name-label,snapshot-time | grep -B1 -A1 -E 'name-label \( RW\): plakar-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$'
 ```
 
 ## Background

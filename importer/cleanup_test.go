@@ -48,6 +48,11 @@ type snapshotXAPI struct {
 	// recordEarly makes the snapshot record exist while the operation still shows,
 	// as in xapi, which creates it before copying the VBDs, VIFs and vTPMs.
 	recordEarly bool
+	// unmarked makes the snapshot's record carry no marker, under this name, as when
+	// the plugin and its watchdog were both killed while VM.snapshot ran.
+	unmarked string
+	// foreignMarker gives an unmarked snapshot a marker holding another UUID.
+	foreignMarker bool
 
 	mu        sync.Mutex
 	calls     []string // "VDI.destroy <ref>", "VM.destroy <ref>"
@@ -175,11 +180,18 @@ func (f *snapshotXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			result = map[string]string{"uuid": "vm-uuid"}
 			break
 		}
-		result = snapshotSummary{
+		summary := snapshotSummary{
 			UUID:         "snap-uuid",
 			OtherConfig:  map[string]string{snapshotMarker: "snap-uuid"},
 			SnapshotTime: "20261001T00:00:00Z",
 		}
+		if f.unmarked != "" {
+			summary.NameLabel, summary.OtherConfig = f.unmarked, map[string]string{}
+			if f.foreignMarker {
+				summary.OtherConfig[snapshotMarker] = "other-uuid"
+			}
+		}
+		result = summary
 	case "pool.get_all":
 		result = []string{"OpaqueRef:pool"}
 	case "pool.get_master":
@@ -409,6 +421,48 @@ func TestSweepDestroysStaleSnapshot(t *testing.T) {
 	}
 }
 
+// An unmarked snapshot named like this connector's labels is what a backup leaves when
+// the plugin and its watchdog are both killed during VM.snapshot: the sweep takes it
+// (#80). Any other unmarked snapshot, including the label format from before the
+// random part, is left alone.
+func TestSweepTakesUnmarkedSnapshotWithOurLabel(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		swept bool
+	}{
+		{"plakar-20261001T000000Z-0a1b2c3d", true},
+		{"plakar-20260101T000000Z", false},
+		{"plakar-20261001T000000Z-0A1B2C3D", false},
+		{"plakar-20261001T000000Z-0a1b2c3d (copy)", false},
+		{"before upgrade", false},
+	} {
+		f := &snapshotXAPI{unmarked: tc.name}
+		p := dialFake(t, f)
+		p.staleAge = time.Hour
+		if err := p.destroyStaleSnapshots(context.Background(), "OpaqueRef:vm"); err != nil {
+			t.Fatal(err)
+		}
+		if swept := slices.Contains(f.calls, "VM.destroy OpaqueRef:snap"); swept != tc.swept {
+			t.Errorf("%q: swept = %v, want %v (calls %q)", tc.name, swept, tc.swept, f.calls)
+		}
+	}
+}
+
+// A copied marker that is not the snapshot's own UUID still keeps it out, whatever its
+// name: the snapshot came from cloning or reverting one of ours.
+func TestSweepLeavesForeignMarkerAlone(t *testing.T) {
+	f := &snapshotXAPI{unmarked: "plakar-20261001T000000Z-0a1b2c3d"}
+	p := dialFake(t, f)
+	p.staleAge = time.Hour
+	f.foreignMarker = true
+	if err := p.destroyStaleSnapshots(context.Background(), "OpaqueRef:vm"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("calls = %q, want none", f.calls)
+	}
+}
+
 // A backup that runs longer than stale_snapshot_age is still exporting its snapshot.
 // Another backup of the same VM must leave it alone: xapi refuses VDI.destroy on the
 // attached disk, and the sweep used to retry that for two minutes, then fail the
@@ -603,5 +657,14 @@ func TestWatchdogLabelWithoutSnapshot(t *testing.T) {
 	}
 	if len(f.calls) != 0 {
 		t.Errorf("calls = %q, want none", f.calls)
+	}
+}
+
+// The sweep finds an unmarked snapshot by the name snapshotLabel gives: the two must agree.
+func TestLabelPatternMatchesSnapshotLabel(t *testing.T) {
+	for range 100 {
+		if l := snapshotLabel(); !labelPattern.MatchString(l) {
+			t.Fatalf("labelPattern does not match %q", l)
+		}
 	}
 }

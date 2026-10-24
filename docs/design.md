@@ -171,9 +171,13 @@ snapshot the connector takes is marked with `plakar_xcpng_snapshot=<its own UUID
 `other_config` (XAPI copies `other_config` on clone and revert, and a copied marker no
 longer matches the UUID of the object it lands on),
 and before step 1 the importer destroys the VM's marked snapshots older than
-`stale_snapshot_age`, with their VDIs, destroying only VDIs that are snapshot copies. The sweep never touches snapshots without the
-marker, whatever their name; only the backup that chose a label, or its watchdog, destroys
-a snapshot by it. The age threshold exists because two backups of the same VM can
+`stale_snapshot_age`, with their VDIs, destroying only VDIs that are snapshot copies. It
+takes a snapshot with no marker key at all too, when its name is exactly a label as chosen
+below, `plakar-<YYYYMMDDTHHMMSSZ>-<8 lowercase hex>`: that is what is left when the plugin
+and its watchdog are both killed while `VM.snapshot` runs, so the marker was never set.
+Any other unmarked snapshot is left alone, and so is one whose marker holds another UUID,
+whatever its name. The risk taken is a snapshot someone else named exactly like that, on a
+VM this connector backs up. The age threshold exists because two backups of the same VM can
 overlap; it has to be longer than the longest backup of one VM. The age is measured on the
 pool master's clock (`host.get_servertime`), which stamped `snapshot_time`, so a plakar host
 whose clock is off cannot sweep a fresh snapshot or keep an old one. A marked snapshot with a

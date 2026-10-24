@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -639,8 +640,27 @@ func (p *Importer) vifs(ctx context.Context, vmRef string) ([]xapi.VIFMeta, erro
 
 type snapshotSummary struct {
 	UUID         string            `json:"uuid"`
+	NameLabel    string            `json:"name_label"`
 	OtherConfig  map[string]string `json:"other_config"`
 	SnapshotTime string            `json:"snapshot_time"`
+}
+
+// labelPattern matches exactly the names snapshotLabel gives.
+var labelPattern = regexp.MustCompile(`^plakar-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$`)
+
+// ours reports whether a snapshot is this connector's: marked with its own UUID, or with
+// no marker at all and named by snapshotLabel. The second is what is left when the
+// plugin and its watchdog are both killed while VM.snapshot runs (#80); a marker copied
+// from another snapshot, by clone or revert, keeps it out whatever its name.
+func (s snapshotSummary) ours() bool {
+	if s.UUID == "" {
+		return false
+	}
+	marker, marked := s.OtherConfig[snapshotMarker]
+	if marked {
+		return marker == s.UUID
+	}
+	return labelPattern.MatchString(s.NameLabel)
 }
 
 // destroyStaleSnapshots destroys this connector's snapshots of a VM that are older
@@ -661,7 +681,7 @@ func (p *Importer) destroyStaleSnapshots(ctx context.Context, vmRef string) erro
 			errs = append(errs, err)
 			continue
 		}
-		if s.OtherConfig[snapshotMarker] != s.UUID || s.UUID == "" {
+		if !s.ours() {
 			continue
 		}
 		t, err := xapi.ParseTime(s.SnapshotTime)
