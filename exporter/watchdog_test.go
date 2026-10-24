@@ -453,20 +453,29 @@ func TestLostWatchdogIsSaidOnce(t *testing.T) {
 	}
 }
 
-// Starting the watchdog says the restore ID once, with where to look: if the watchdog
-// is killed after Ctrl-C has ended the plugin, nothing is left to say it (#56).
+// Starting the watchdog says the restore ID once, with where to look, before the first
+// create: if the watchdog is killed after Ctrl-C has ended the plugin, nothing is left
+// to say it (#56).
 func TestRestoreIDIsSaidWhenTheWatchdogStarts(t *testing.T) {
+	f := &restoreXAPI{}
+	createsBefore := -1
 	old := startWatchdog
 	startWatchdog = func(string, string, map[string]string) (*watchdog.Watchdog, error) {
+		f.mu.Lock()
+		createsBefore = len(f.vdiDescs)
+		f.mu.Unlock()
 		return watchdog.FromWriter(&recordWatchdog{}), nil
 	}
 	t.Cleanup(func() { startWatchdog = old })
-	p := restoreExporter(t, &restoreXAPI{})
+	p := restoreExporter(t, f)
 	p.watchdog = nil
 	out := stderrOf(t, func() {
-		p.watch(vdiKey("OpaqueRef:a"))
+		restoreOneDisk(t, p)
 		p.watch(vdiKey("OpaqueRef:b"))
 	})
+	if createsBefore != 0 {
+		t.Fatalf("watchdog started after %d VDI.create calls", createsBefore)
+	}
 	said := "xcpng: restore " + p.restoreID() + ":"
 	if n := strings.Count(out, said); n != 1 {
 		t.Fatalf("%q said %d times:\n%s", said, n, out)
