@@ -129,6 +129,9 @@ type restoreXAPI struct {
 	tasks          map[string]string
 	tasksDestroyed []string
 	duringImport   func()
+	// taskStatus overrides the "success" task.get_status answers, by ref; task.set_status
+	// writes it.
+	taskStatus map[string]string
 }
 
 // tasksLeft returns the names of the tasks never destroyed.
@@ -213,6 +216,14 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result = ref
 	case "task.get_status":
 		result = "success"
+		if s, ok := f.taskStatus[str(1)]; ok {
+			result = s
+		}
+	case "task.set_status":
+		if f.taskStatus == nil {
+			f.taskStatus = map[string]string{}
+		}
+		f.taskStatus[str(1)] = str(2)
 	case "task.get_by_name_label":
 		refs := []string{}
 		for ref, name := range f.tasks {

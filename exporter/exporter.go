@@ -11,6 +11,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/PlakarKorp/kloset/connectors"
 	"github.com/PlakarKorp/kloset/connectors/exporter"
@@ -51,6 +52,9 @@ type Exporter struct {
 	watchdogLost bool
 	// id names this restore, see restoreID.
 	id string
+	// pendingSince holds, for the watchdog, when it first found each task still
+	// pending (see destroyLabelledTask).
+	pendingSince map[string]time.Time
 }
 
 func NewExporter(ctx context.Context, opts *connectors.Options, name string, config map[string]string) (exporter.Exporter, error) {

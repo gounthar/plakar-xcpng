@@ -247,37 +247,83 @@ func (p *Exporter) destroyLabelledVDI(ctx context.Context, srRef, label string) 
 	return nil
 }
 
-// destroyLabelledTask destroys the xapi tasks named for label (importTaskName). A task still running is only
-// marked by task.destroy, and xapi removes it once it has ended (destroy in
-// xapi_task.ml, timeout_tasks in db_gc_util.ml): an import whose connection was cut
-// fails. It returns errGone when no task has the name. A task.create that had not
+// taskEndWait bounds how long the watchdog waits for a pending import task to end
+// before it takes the task for one never used. xapi fails the task of an import whose
+// connection was cut within about 2 s (19 of 19 cuts in the #58 runs, and the #60
+// runs); a task the plugin created and was killed before using stays pending.
+var taskEndWait = 30 * time.Second
+
+// errTaskPending is what destroyLabelledTask returns for a task still pending that
+// may yet end: the watchdog puts it aside and tries again, as for a held VDI.
+var errTaskPending = errors.New("import task still pending")
+
+// destroyLabelledTask destroys the xapi tasks named for label (importTaskName). xapi
+// removes a pending task only once it has ended (destroy in xapi_task.ml), and a task
+// created and never used does not end: xapi keeps it a day (pending_task_timeout). So
+// a task found pending is given taskEndWait to end, then set cancelled, which only its
+// creator's user may do (task.set_status, assert_op_valid in taskHelper.ml), and
+// destroyed. It returns errGone when no task has the name. A task.create that had not
 // reached xapi when the plugin died may still make one after this has looked; that
-// task is never used and xapi removes it a day later.
+// task is never used, and xapi removes it a day later.
 func (p *Exporter) destroyLabelledTask(ctx context.Context, label string) error {
 	n := 0
+	waiting := false
 	err := p.retry(ctx, cleanupRetry, func(ctx context.Context, _ int) error {
 		var refs []string
 		if err := p.client.Call(ctx, &refs, "task.get_by_name_label", importTaskName(label)); err != nil {
 			return err
 		}
 		var errs []error
+		waiting = false
 		for _, ref := range refs {
-			err := p.client.Call(ctx, nil, "task.destroy", ref)
-			if err == nil {
+			pending, err := p.endTask(ctx, ref)
+			switch {
+			case pending:
+				waiting = true
+			case err == nil:
 				n++
-			} else if !xapi.IsCode(err, "HANDLE_INVALID") { // else destroyed since the list was read
+			case !xapi.IsCode(err, "HANDLE_INVALID"): // else destroyed since the list was read
 				errs = append(errs, err)
 			}
 		}
 		return errors.Join(errs...)
 	})
-	if err != nil {
+	switch {
+	case err != nil:
 		return err
-	}
-	if n == 0 {
+	case waiting:
+		return errTaskPending
+	case n == 0:
 		return errGone
 	}
 	return nil
+}
+
+// endTask destroys a task that has ended, and a pending one once it has been pending
+// for taskEndWait, after setting it cancelled. It reports whether the task is pending
+// and still given time.
+func (p *Exporter) endTask(ctx context.Context, ref string) (bool, error) {
+	var status string
+	if err := p.client.Call(ctx, &status, "task.get_status", ref); err != nil {
+		return false, err
+	}
+	if status == "pending" {
+		if p.pendingSince == nil {
+			p.pendingSince = map[string]time.Time{}
+		}
+		since, ok := p.pendingSince[ref]
+		if !ok {
+			p.pendingSince[ref] = time.Now()
+			return true, nil
+		}
+		if time.Since(since) < taskEndWait {
+			return true, nil
+		}
+		if err := p.client.Call(ctx, nil, "task.set_status", ref, "cancelled"); err != nil {
+			return false, err
+		}
+	}
+	return false, p.client.Call(ctx, nil, "task.destroy", ref)
 }
 
 // destroyMarkedVM destroys the VM named name whose other_config marks it with label,

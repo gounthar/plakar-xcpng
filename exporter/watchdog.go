@@ -182,7 +182,7 @@ func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {
 			return
 		}
 		switch err := p.destroyKey(ctx, key); {
-		case heldByXapi(err):
+		case heldByXapi(err) || errors.Is(err, errTaskPending):
 			busy = append(busy, key)
 			last[key] = err
 		case errors.Is(err, errGone):

@@ -279,7 +279,10 @@ and label, then by reference once the create answers, and unlisted once it is de
 or kept: a VM is kept, with its disks, once its Secure Boot check passes or holds it
 back, before `VM.start`. Each write into a VDI runs under a xapi task named
 `plakar import_raw_vdi <label>`, with a label of its own, listed for as long as the write runs, so that a task left by an interrupted
-write is destroyed by name. If the pipe closes while something is listed, the watchdog
+write is destroyed by name. `task.destroy` only marks a task still pending, and a task
+the exporter created and was killed before using never ends, so the watchdog gives a
+pending task 30 s to end (a cut import's does within about 2 s), then sets it cancelled
+and destroys it. If the pipe closes while something is listed, the watchdog
 destroys the VMs first, then the VDIs and tasks, with the same label searches and retries
 as above. A task a killed watchdog leaves is removed by xapi itself: about an hour after it
 ended, or a day after it was created if the write never started (`completed_task_timeout`
