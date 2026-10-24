@@ -211,7 +211,7 @@ func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {
 			// put aside, so the busy answer before it is kept.
 			errs = append(errs, fmt.Errorf("%s: %w", key, errors.Join(last[key], err)))
 		default:
-			fmt.Fprintf(os.Stderr, "xcpng: cleaned up %s left by an interrupted restore\n", key)
+			fmt.Fprintf(os.Stderr, "xcpng: cleaned up %s left by the restore\n", key)
 		}
 	}
 	for _, key := range keys {

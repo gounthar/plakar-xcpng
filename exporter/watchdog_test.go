@@ -321,7 +321,7 @@ func TestCutTryKeepsTheBusyReason(t *testing.T) {
 
 // A restore failing right after a cut import gets VDI_IN_USE from its own cleanup:
 // it waits for xapi to let the VDI go rather than leave it to the watchdog, which
-// would report it as left by an interrupted restore.
+// would report it only once the restore has ended.
 func TestInProcessCleanupWaitsForAHeldVDI(t *testing.T) {
 	f := &restoreXAPI{}
 	p, rec := recordedExporter(t, f)
@@ -498,5 +498,46 @@ func TestRefusedKeyKeepsTheWatchdog(t *testing.T) {
 	}
 	if got := rec.pending(t); !slices.Equal(got, []string{"vdi/OpaqueRef:b"}) {
 		t.Fatalf("listed %q", got)
+	}
+}
+
+// A VDI xapi still holds when heldWait runs out stays listed, and its error says the
+// watchdog tries again: without that it reads as a disk left on the pool (#78).
+func TestHeldVDIErrorSaysTheWatchdogRetries(t *testing.T) {
+	old := heldWait
+	heldWait = 50 * time.Millisecond
+	t.Cleanup(func() { heldWait = old })
+	f := &restoreXAPI{}
+	p, rec := recordedExporter(t, f)
+	restored := restoreOneDisk(t, p)
+	f.held = map[string]bool{"OpaqueRef:vdi0": true}
+	err := p.destroyDisks(context.Background(), sbVM, restored)
+	if err == nil || !strings.Contains(err.Error(), "VDI_IN_USE") || !strings.Contains(err.Error(), heldRetryHint) {
+		t.Fatalf("error %v does not say the watchdog tries again", err)
+	}
+	if got := rec.pending(t); !slices.Contains(got, vdiKey("OpaqueRef:vdi0")) {
+		t.Fatalf("listed %q, want the held VDI", got)
+	}
+}
+
+// With the watchdog lost nothing tries again, so the error does not say it does.
+func TestHeldVDIErrorWithoutWatchdog(t *testing.T) {
+	old := heldWait
+	heldWait = 50 * time.Millisecond
+	t.Cleanup(func() { heldWait = old })
+	f := &restoreXAPI{}
+	p := restoreExporter(t, f)
+	p.watchdog = watchdog.FromWriter(deadWatchdog{})
+	var err error
+	stderrOf(t, func() {
+		restored := restoreOneDisk(t, p)
+		f.held = map[string]bool{"OpaqueRef:vdi0": true}
+		err = p.destroyDisks(context.Background(), sbVM, restored)
+	})
+	if !p.watchdogLost {
+		t.Fatal("the watchdog was not lost")
+	}
+	if err == nil || strings.Contains(err.Error(), heldRetryHint) {
+		t.Fatalf("error %v says a lost watchdog tries again", err)
 	}
 }
