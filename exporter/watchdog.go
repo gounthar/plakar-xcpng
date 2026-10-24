@@ -134,7 +134,8 @@ func destroyLeftovers(ctx context.Context, config map[string]string, keys []stri
 // every restorePollDelay for up to restoreWait. The watchdog starts the moment the
 // plugin dies, and xapi still holds a VDI for an import whose connection was just cut:
 // on XCP-ng 8.3 the first VDI.destroy gets VDI_IN_USE, for about a second (see
-// restoreWait). A hold of about two minutes was seen once and not reproduced.
+// restoreWait). A hold of about two minutes was seen once, in the #51 runs; the
+// measurement behind restoreWait did not reproduce it, and its cause is not known.
 // Each key gets its first try before any wait, so one held long
 // cannot use up the watchdog's time while the others wait their turn.
 func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {

@@ -27,8 +27,9 @@ const restoreMarkerKey = "plakar_restore"
 // the watchdog's wait for a VDI xapi still holds after a cut import.
 //
 // For the second, measured on XCP-ng 8.3 (xapi 26.1.19, ext SR): after the importing
-// process was killed, VDI.destroy got VDI_IN_USE for 0.99 to 1.28 s in 19 of 19 cuts,
-// early, mid-disk or near the end. xapi holds the VDI until vhd-tool sees the closed
+// process was killed, VDI.destroy got VDI_IN_USE for 0.99 to 1.28 s in 19 of 19 cuts:
+// 18 on a 2 GiB disk at 5, 50 or 95 %, three each for the sparse and the plain
+// import, and one on a 512 MiB disk at 50 %. xapi holds the VDI until vhd-tool sees the closed
 // socket and the dom0 VBD is unplugged. An unplug xapi has to retry can take up to
 // 5 min (safe_unplug in xapi's attach_helpers.ml), which is the longest hold that
 // still ends; 10 min covers it.
