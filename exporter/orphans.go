@@ -152,15 +152,30 @@ func heldByXapi(err error) bool {
 // plugin exits, so the failing record need not wait for it.
 var heldWait = 3 * time.Minute
 
+// heldRetryHint ends the error of a VDI still held once heldWait is up, while the
+// watchdog lists it: the disk is not left yet (#78).
+const heldRetryHint = "the restore watchdog tries again to destroy it when the restore ends"
+
 // destroyVDIs is destroyRef for the restore's own cleanup of VDIs. Each is tried once,
 // then those xapi still holds are tried again together every restorePollDelay until
 // heldWait runs out, so several held disks cost one wait, not one each. Left to the
-// watchdog instead, a VDI would be reported as left by an interrupted restore. Once ctx
+// watchdog instead, a VDI would be reported by the watchdog, after the restore. Once ctx
 // is done the waiting stops, the held VDIs stay listed, and the watchdog destroys them
 // when the plugin exits: an interrupted restore must not hold up its exit for them.
-// It returns the error of each VDI not destroyed.
-func (p *Exporter) destroyVDIs(ctx context.Context, refs []string) map[string]error {
-	errs := map[string]error{}
+// It returns the error of each VDI not destroyed; a held one's says the watchdog tries
+// again, unless the watchdog is lost.
+func (p *Exporter) destroyVDIs(ctx context.Context, refs []string) (errs map[string]error) {
+	errs = map[string]error{}
+	defer func() {
+		if p.watchdog == nil || p.watchdogLost {
+			return
+		}
+		for ref, err := range errs {
+			if heldByXapi(err) {
+				errs[ref] = fmt.Errorf("%w; %s", err, heldRetryHint)
+			}
+		}
+	}()
 	try := func(refs []string) (held []string) {
 		for _, ref := range refs {
 			err := p.destroyRef(ctx, cleanupRetry, "VDI.destroy", ref)
