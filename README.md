@@ -63,7 +63,8 @@ same VM sweeps it once it is older than `stale_snapshot_age`. To list what the c
 xe snapshot-list params=uuid,name-label,snapshot-time,other-config | grep -B3 plakar_xcpng_snapshot
 ```
 
-and the unmarked ones the sweep also takes:
+and every snapshot named like a label, marked or not, which includes the unmarked ones the
+sweep also takes:
 
 ```sh
 xe snapshot-list params=uuid,name-label,snapshot-time | grep -B1 -A1 -E 'name-label \( RW\): plakar-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$'
