@@ -95,12 +95,17 @@ func importTaskName(label string) string { return "plakar import_raw_vdi " + lab
 // which removes a finished task about an hour after it ended (completed_task_timeout
 // in xapi_globs.ml). Killed before do returns, the plugin leaves the task to the
 // watchdog: a task created but never used stays pending, which xapi keeps for a day.
+// A failed import keeps the task listed: its destroy only marks a task still pending,
+// and one whose request never reached xapi stays pending, so the watchdog looks at it
+// again when the plugin exits.
 func (p *Exporter) importing(do func(task string) error) error {
 	label := p.restoreLabel()
 	key := taskLabelKey(label)
 	p.watch(key)
 	err := do(importTaskName(label))
-	p.unwatch(key)
+	if err == nil {
+		p.unwatch(key)
+	}
 	return err
 }
 

@@ -130,8 +130,9 @@ type restoreXAPI struct {
 	tasksDestroyed []string
 	duringImport   func()
 	// taskStatus overrides the "success" task.get_status answers, by ref; task.set_status
-	// writes it.
+	// writes it. failImport answers every import with HTTP 500.
 	taskStatus map[string]string
+	failImport bool
 }
 
 // tasksLeft returns the names of the tasks never destroyed.
@@ -163,6 +164,10 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/import_raw_vdi" {
 		if f.duringImport != nil {
 			f.duringImport()
+		}
+		if f.failImport {
+			http.Error(w, "refused", http.StatusInternalServerError)
+			return
 		}
 		(&destroyRecorder{}).recordImport(w, r)
 		return

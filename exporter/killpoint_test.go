@@ -237,3 +237,23 @@ func TestImportTaskIsListedWhileItRuns(t *testing.T) {
 		}
 	}
 }
+
+// A failed import's task stays listed: its destroy only marks a task still pending, and
+// one whose request never reached xapi stays pending.
+func TestFailedImportKeepsItsTaskListed(t *testing.T) {
+	f := &restoreXAPI{failImport: true}
+	p, rec := recordedExporter(t, f)
+	if _, err := p.restoreDisk(context.Background(), "OpaqueRef:sr", false, "disk-0", diskRecord(make([]byte, 4096))); err == nil {
+		t.Fatal("restoreDisk succeeded although the import failed")
+	}
+	f.mu.Lock()
+	var name string
+	for _, n := range f.tasks {
+		name = n
+	}
+	f.mu.Unlock()
+	label, _ := strings.CutPrefix(name, "plakar import_raw_vdi ")
+	if pending := rec.pending(t); !slices.Equal(pending, []string{taskLabelKey(label)}) {
+		t.Fatalf("listed %q, want only %s", pending, taskLabelKey(label))
+	}
+}
