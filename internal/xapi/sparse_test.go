@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -70,6 +71,7 @@ type fakeTasks struct {
 	created   int
 	destroyed int
 	importArg string
+	names     []string // name_label of each task.create
 }
 
 const fakeTaskRef = "OpaqueRef:task"
@@ -96,6 +98,10 @@ func withTasks(t *testing.T, ft *fakeTasks, h http.HandlerFunc) http.Handler {
 		switch req.Method {
 		case "task.create":
 			ft.created++
+			if len(req.Params) > 1 {
+				name, _ := req.Params[1].(string)
+				ft.names = append(ft.names, name)
+			}
 			result = fakeTaskRef
 		case "task.get_status":
 			result = ft.status
@@ -171,7 +177,7 @@ func TestImportSparseVDISkipsZeroBlocks(t *testing.T) {
 	var got received
 	c := testClient(chunkedServer(t, disk, http.StatusOK, &got))
 
-	sent, err := c.ImportSparseVDI(context.Background(), "OpaqueRef:vdi", size, bytes.NewReader(src))
+	sent, err := c.ImportSparseVDI(context.Background(), "OpaqueRef:vdi", size, bytes.NewReader(src), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +207,7 @@ func TestImportSparseVDIReportsStatus(t *testing.T) {
 	var got received
 	c := testClient(chunkedServer(t, nil, http.StatusNotFound, &got))
 	src := bytes.Repeat([]byte{1}, 4096)
-	_, err := c.ImportSparseVDI(context.Background(), "OpaqueRef:vdi", int64(len(src)), bytes.NewReader(src))
+	_, err := c.ImportSparseVDI(context.Background(), "OpaqueRef:vdi", int64(len(src)), bytes.NewReader(src), "")
 	if err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("err = %v, want an HTTP 404 error", err)
 	}
@@ -211,7 +217,7 @@ func TestImportSparseVDIShortSource(t *testing.T) {
 	disk := make([]byte, 2*sparseBlock)
 	var got received
 	c := testClient(chunkedServer(t, disk, http.StatusOK, &got))
-	_, err := c.ImportSparseVDI(context.Background(), "OpaqueRef:vdi", int64(len(disk)), bytes.NewReader([]byte{1, 2, 3}))
+	_, err := c.ImportSparseVDI(context.Background(), "OpaqueRef:vdi", int64(len(disk)), bytes.NewReader([]byte{1, 2, 3}), "")
 	if err == nil {
 		t.Fatal("a source shorter than the disk did not fail")
 	}
@@ -229,7 +235,7 @@ func TestWriteVDIAtSendsOneChunk(t *testing.T) {
 
 	var got received
 	c := testClient(chunkedServer(t, disk, http.StatusOK, &got))
-	if err := c.WriteVDIAt(context.Background(), "OpaqueRef:vdi", 6144, data); err != nil {
+	if err := c.WriteVDIAt(context.Background(), "OpaqueRef:vdi", 6144, data, ""); err != nil {
 		t.Fatal(err)
 	}
 	<-got.done
@@ -299,7 +305,7 @@ func TestImportSparseVDIWriteFailure(t *testing.T) {
 			c := testClient(srv)
 
 			src := bytes.Repeat([]byte{1}, len(disk))
-			_, err := c.ImportSparseVDI(context.Background(), "OpaqueRef:vdi", int64(len(src)), bytes.NewReader(src))
+			_, err := c.ImportSparseVDI(context.Background(), "OpaqueRef:vdi", int64(len(src)), bytes.NewReader(src), "")
 			if !IsCode(err, "VDI_IO_ERROR") {
 				t.Fatalf("err = %v, want VDI_IO_ERROR", err)
 			}
@@ -329,7 +335,7 @@ func TestImportRawVDIWriteFailure(t *testing.T) {
 			t.Cleanup(srv.Close)
 			c := testClient(srv)
 			src := bytes.Repeat([]byte{1}, 1<<20)
-			err := c.ImportRawVDI(context.Background(), "OpaqueRef:vdi", int64(len(src)), bytes.NewReader(src))
+			err := c.ImportRawVDI(context.Background(), "OpaqueRef:vdi", int64(len(src)), bytes.NewReader(src), "")
 			if status == "failure" && !IsCode(err, "VDI_IO_ERROR") {
 				t.Fatalf("err = %v, want VDI_IO_ERROR", err)
 			}
@@ -338,6 +344,30 @@ func TestImportRawVDIWriteFailure(t *testing.T) {
 			}
 			ft.check(t)
 		})
+	}
+}
+
+// TestImportTaskName covers the name an import's task is created with: the caller's, so
+// that a task left by a killed process can be found again, or a fixed one.
+func TestImportTaskName(t *testing.T) {
+	for _, tc := range []struct{ name, want string }{
+		{"plakar-restore-x-1", "plakar-restore-x-1"},
+		{"", "plakar import_raw_vdi"},
+	} {
+		ft := &fakeTasks{status: "success"}
+		srv := httptest.NewTLSServer(withTasks(t, ft, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+		}))
+		c := testClient(srv)
+		if err := c.ImportRawVDI(context.Background(), "OpaqueRef:vdi", 4, strings.NewReader("data"), tc.name); err != nil {
+			t.Fatal(err)
+		}
+		srv.Close()
+		ft.mu.Lock()
+		if !slices.Equal(ft.names, []string{tc.want}) {
+			t.Errorf("name %q: tasks created as %q, want %q", tc.name, ft.names, tc.want)
+		}
+		ft.mu.Unlock()
 	}
 }
 

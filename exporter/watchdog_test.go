@@ -127,6 +127,75 @@ func TestWatchdogDestroysVMsFirst(t *testing.T) {
 	}
 }
 
+// The watchdog destroys the task of an import the plugin was killed in, by its name. A
+// name with no task, the plugin killed before task.create, is nothing to report.
+func TestWatchdogDestroysLabelledTask(t *testing.T) {
+	f := &restoreXAPI{tasks: map[string]string{"OpaqueRef:t1": "plakar import_raw_vdi T", "OpaqueRef:t2": "T"}}
+	p := restoreExporter(t, f)
+	out := stderrOf(t, func() {
+		if err := p.destroyListed(context.Background(), []string{taskLabelKey("T"), taskLabelKey("none")}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !slices.Equal(f.tasksDestroyed, []string{"OpaqueRef:t1"}) {
+		t.Fatalf("destroyed tasks %q, want OpaqueRef:t1", f.tasksDestroyed)
+	}
+	if !strings.Contains(out, "cleaned up task-label/T ") || strings.Contains(out, "task-label/none") {
+		t.Errorf("said:\n%s", out)
+	}
+}
+
+// A task the plugin created and was killed before using stays pending: xapi only marks
+// it on task.destroy. The watchdog gives it taskEndWait to end, then sets it cancelled
+// and destroys it, and says it cleaned it up only then.
+func TestWatchdogCancelsAnUnusedTask(t *testing.T) {
+	old, oldPoll := taskEndWait, restorePollDelay
+	taskEndWait, restorePollDelay = 50*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { taskEndWait, restorePollDelay = old, oldPoll })
+	f := &restoreXAPI{
+		tasks:      map[string]string{"OpaqueRef:t1": "plakar import_raw_vdi T"},
+		taskStatus: map[string]string{"OpaqueRef:t1": "pending"},
+	}
+	p := restoreExporter(t, f)
+	start := time.Now()
+	if err := p.destroyListed(context.Background(), []string{taskLabelKey("T")}); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(start); took < taskEndWait {
+		t.Errorf("cancelled after %s, before taskEndWait (%s)", took, taskEndWait)
+	}
+	if f.taskStatus["OpaqueRef:t1"] != "cancelled" || !slices.Contains(f.tasksDestroyed, "OpaqueRef:t1") {
+		t.Fatalf("status %q, destroyed %q", f.taskStatus["OpaqueRef:t1"], f.tasksDestroyed)
+	}
+}
+
+// A task that ends within taskEndWait, as a cut import's does, is destroyed, never
+// cancelled.
+func TestWatchdogWaitsForATaskToEnd(t *testing.T) {
+	old, oldPoll := taskEndWait, restorePollDelay
+	taskEndWait, restorePollDelay = time.Minute, time.Millisecond
+	t.Cleanup(func() { taskEndWait, restorePollDelay = old, oldPoll })
+	f := &restoreXAPI{
+		tasks:      map[string]string{"OpaqueRef:t1": "plakar import_raw_vdi T"},
+		taskStatus: map[string]string{"OpaqueRef:t1": "pending"},
+	}
+	p := restoreExporter(t, f)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		f.mu.Lock()
+		f.taskStatus["OpaqueRef:t1"] = "failure"
+		f.mu.Unlock()
+	}()
+	if err := p.destroyListed(context.Background(), []string{taskLabelKey("T")}); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.taskStatus["OpaqueRef:t1"] != "failure" || !slices.Contains(f.tasksDestroyed, "OpaqueRef:t1") {
+		t.Fatalf("status %q, destroyed %q", f.taskStatus["OpaqueRef:t1"], f.tasksDestroyed)
+	}
+}
+
 func TestIsWatchdog(t *testing.T) {
 	if !IsWatchdog([]string{"xcpngExporter", WatchdogArg}) {
 		t.Error("watchdog argument not recognised")

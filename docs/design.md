@@ -277,9 +277,16 @@ exporter starts the same kind of watchdog at its first create (`--xcpng-restore-
 Each VDI and VM is listed with it before its create is sent, by SR and label or by name
 and label, then by reference once the create answers, and unlisted once it is destroyed
 or kept: a VM is kept, with its disks, once its Secure Boot check passes or holds it
-back, before `VM.start`. If the pipe closes while something is listed, the watchdog
-destroys the VMs first, then the VDIs, with the same label searches and retries as
-above. A cleanup that fails while the exporter is alive leaves its object listed, so the
+back, before `VM.start`. Each write into a VDI runs under a xapi task named
+`plakar import_raw_vdi <label>`, with a label of its own, listed for as long as the write runs, so that a task left by an interrupted
+write is destroyed by name. `task.destroy` only marks a task still pending, and a task
+the exporter created and was killed before using never ends, so the watchdog gives a
+pending task 30 s to end (a cut import's does within about 2 s), then sets it cancelled
+and destroys it. If the pipe closes while something is listed, the watchdog
+destroys the VMs first, then the VDIs and tasks, with the same label searches and retries
+as above. A task a killed watchdog leaves is removed by xapi itself: about an hour after it
+ended, or a day after it was created if the write never started (`completed_task_timeout`
+and `pending_task_timeout` in xapi's `xapi_globs.ml`). A cleanup that fails while the exporter is alive leaves its object listed, so the
 watchdog tries it once more when the exporter exits. A VDI xapi still holds (`VDI_IN_USE`,
 as after an import whose connection was cut) is retried by the exporter itself, all of a VM's held disks together, for up to
 3 minutes; what is still held then, or held when the restore was interrupted, is left to the watchdog. What a killed watchdog, or a

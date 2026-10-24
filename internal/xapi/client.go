@@ -63,6 +63,11 @@ type Client struct {
 	mu      sync.Mutex
 	base    string // https://host[:port]
 	session string
+
+	// ImportTaskCreated, when set, is called once task.create has answered for an
+	// import, before the import is sent: a lab build pauses there, where a killed
+	// process leaves a task xapi keeps pending for a day.
+	ImportTaskCreated func()
 }
 
 // Dial logs in to the pool master. If the configured host is a pool member, it follows
@@ -292,9 +297,10 @@ func (r *exactReader) Read(p []byte) (int, error) {
 
 func (r *exactReader) Close() error { return r.rc.Close() }
 
-// ImportRawVDI writes size bytes from r into an existing VDI.
-func (c *Client) ImportRawVDI(ctx context.Context, vdiRef string, size int64, r io.Reader) error {
-	task, done, err := c.importTask(ctx)
+// ImportRawVDI writes size bytes from r into an existing VDI, under a xapi task named
+// taskName (see importTask).
+func (c *Client) ImportRawVDI(ctx context.Context, vdiRef string, size int64, r io.Reader, taskName string) error {
+	task, done, err := c.importTask(ctx, taskName)
 	if err != nil {
 		return err
 	}
@@ -322,15 +328,22 @@ func (c *Client) ImportRawVDI(ctx context.Context, vdiRef string, size int64, r 
 	return nil
 }
 
-// importTask creates the task an import runs under, and returns it with a function
-// that destroys it. xapi answers an import with 200 before it writes the disk, and
+// importTask creates the task an import runs under, named name, and returns it with a
+// function that destroys it. A process killed before it destroys the task leaves it to
+// whoever can find it by name; empty, name is "plakar import_raw_vdi". xapi answers an import with 200 before it writes the disk, and
 // reports a failure of the write on that task. What it sends on the connection after
 // the 200 varies: a 400, a 400 followed by a 500, or nothing before it closes, so the
 // connection alone cannot tell a failed write from a complete one.
-func (c *Client) importTask(ctx context.Context) (string, func(), error) {
+func (c *Client) importTask(ctx context.Context, name string) (string, func(), error) {
+	if name == "" {
+		name = "plakar import_raw_vdi"
+	}
 	var task string
-	if err := c.Call(ctx, &task, "task.create", "plakar import_raw_vdi", ""); err != nil {
+	if err := c.Call(ctx, &task, "task.create", name, ""); err != nil {
 		return "", nil, fmt.Errorf("import_raw_vdi: %w", err)
+	}
+	if c.ImportTaskCreated != nil {
+		c.ImportTaskCreated()
 	}
 	done := func() {
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -386,24 +399,26 @@ const sparseBlock = 2 << 20
 // ImportSparseVDI writes size bytes from r into an existing VDI and sends only the
 // 2 MiB blocks that hold a non-zero byte, so a file-based SR allocates no block for
 // the rest. The VDI must read as zeroes before the import (see SRZeroesNewVDIs). It
-// returns the number of bytes sent.
+// returns the number of bytes sent. The import runs under a xapi task named taskName
+// (see importTask).
 //
 // It uses xapi's chunked import (import_raw_vdi with chunked set): each chunk is a
 // little-endian uint64 byte offset and uint32 length followed by the data, and an
 // all-zero header ends the stream. xapi rejects a Transfer-Encoding and the body
 // length is not known in advance, which net/http cannot send, so the request is
 // written on the TLS connection directly.
-func (c *Client) ImportSparseVDI(ctx context.Context, vdiRef string, size int64, r io.Reader) (int64, error) {
-	return c.importChunked(ctx, vdiRef, func(w *bufio.Writer) (int64, error) {
+func (c *Client) ImportSparseVDI(ctx context.Context, vdiRef string, size int64, r io.Reader, taskName string) (int64, error) {
+	return c.importChunked(ctx, vdiRef, taskName, func(w *bufio.Writer) (int64, error) {
 		return writeChunks(w, size, r)
 	})
 }
 
 // WriteVDIAt writes data into an existing VDI at byte offset off, in one chunk of
 // xapi's chunked import, and leaves the rest of the VDI as it was. off and len(data)
-// must be whole 512-byte sectors.
-func (c *Client) WriteVDIAt(ctx context.Context, vdiRef string, off int64, data []byte) error {
-	_, err := c.importChunked(ctx, vdiRef, func(w *bufio.Writer) (int64, error) {
+// must be whole 512-byte sectors. The write runs under a xapi task named taskName (see
+// importTask).
+func (c *Client) WriteVDIAt(ctx context.Context, vdiRef string, off int64, data []byte, taskName string) error {
+	_, err := c.importChunked(ctx, vdiRef, taskName, func(w *bufio.Writer) (int64, error) {
 		if err := writeChunk(w, off, data); err != nil {
 			return 0, err
 		}
@@ -414,8 +429,8 @@ func (c *Client) WriteVDIAt(ctx context.Context, vdiRef string, off int64, data 
 
 // importChunked sends a chunked import_raw_vdi request whose chunks body writes, and
 // returns what body reports as sent once xapi has finished the write.
-func (c *Client) importChunked(ctx context.Context, vdiRef string, body func(*bufio.Writer) (int64, error)) (int64, error) {
-	task, done, err := c.importTask(ctx)
+func (c *Client) importChunked(ctx context.Context, vdiRef, taskName string, body func(*bufio.Writer) (int64, error)) (int64, error) {
+	task, done, err := c.importTask(ctx, taskName)
 	if err != nil {
 		return 0, err
 	}
