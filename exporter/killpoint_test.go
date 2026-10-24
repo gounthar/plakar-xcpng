@@ -194,7 +194,7 @@ func TestKillInsideRestoreDisk(t *testing.T) {
 }
 
 // A restore killed while it writes a disk leaves the import's task: it is listed by its
-// name for as long as the import runs, and named with the restore ID.
+// name for as long as the import runs, and named as an import, with the restore ID.
 func TestImportTaskIsListedWhileItRuns(t *testing.T) {
 	f := &restoreXAPI{}
 	p, rec := recordedExporter(t, f)
@@ -205,11 +205,13 @@ func TestImportTaskIsListedWhileItRuns(t *testing.T) {
 		names = f.tasksLeft()
 	}
 	restoreOneDisk(t, p)
-	if len(names) != 1 || !strings.HasPrefix(names[0], p.restoreID()+"-") {
-		t.Fatalf("tasks during the import %q, want one named under %s", names, p.restoreID())
+	prefix := "plakar import_raw_vdi " + p.restoreID() + "-"
+	if len(names) != 1 || !strings.HasPrefix(names[0], prefix) {
+		t.Fatalf("tasks during the import %q, want one named %s...", names, prefix)
 	}
-	if !slices.Contains(during, taskLabelKey(names[0])) {
-		t.Errorf("listed %q during the import, want %s", during, taskLabelKey(names[0]))
+	key := taskLabelKey(strings.TrimPrefix(names[0], "plakar import_raw_vdi "))
+	if !slices.Contains(during, key) {
+		t.Errorf("listed %q during the import, want %s", during, key)
 	}
 	if left := f.tasksLeft(); len(left) != 0 {
 		t.Errorf("tasks %q left after the import", left)

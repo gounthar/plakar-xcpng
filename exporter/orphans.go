@@ -247,7 +247,7 @@ func (p *Exporter) destroyLabelledVDI(ctx context.Context, srRef, label string) 
 	return nil
 }
 
-// destroyLabelledTask destroys the xapi tasks named label. A task still running is only
+// destroyLabelledTask destroys the xapi tasks named for label (importTaskName). A task still running is only
 // marked by task.destroy, and xapi removes it once it has ended (destroy in
 // xapi_task.ml, timeout_tasks in db_gc_util.ml): an import whose connection was cut
 // fails. It returns errGone when no task has the name. A task.create that had not
@@ -257,7 +257,7 @@ func (p *Exporter) destroyLabelledTask(ctx context.Context, label string) error 
 	n := 0
 	err := p.retry(ctx, cleanupRetry, func(ctx context.Context, _ int) error {
 		var refs []string
-		if err := p.client.Call(ctx, &refs, "task.get_by_name_label", label); err != nil {
+		if err := p.client.Call(ctx, &refs, "task.get_by_name_label", importTaskName(label)); err != nil {
 			return err
 		}
 		var errs []error

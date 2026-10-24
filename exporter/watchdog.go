@@ -75,7 +75,7 @@ func (p *Exporter) loseWatchdog(err error) {
 	p.watchdogLost = true
 	warnf("the restore goes on, but if it is killed from here, what it has made and not finished stays on the pool, "+
 		"named by %[1]s: VMs whose other_config:%[2]s starts with it, VDIs no VM uses whose name or description holds it, "+
-		"and tasks whose name starts with it, which xapi removes by itself within a day (%[3]s)",
+		"and tasks whose name holds it, which xapi removes by itself within a day (%[3]s)",
 		p.restoreID(), restoreMarkerKey, err)
 }
 
@@ -84,6 +84,10 @@ func (p *Exporter) unwatch(key string) {
 		_ = p.watchdog.Remove(key)
 	}
 }
+
+// importTaskName is the name of the xapi task a write into a VDI runs under: what it is,
+// for a user reading xe task-list, then the label the watchdog finds it by.
+func importTaskName(label string) string { return "plakar import_raw_vdi " + label }
 
 // importing runs do, a write into a VDI, under a xapi task named by a label of its own,
 // listed with the watchdog from before the task is created until do returns. By then
@@ -95,7 +99,7 @@ func (p *Exporter) importing(do func(task string) error) error {
 	label := p.restoreLabel()
 	key := taskLabelKey(label)
 	p.watch(key)
-	err := do(label)
+	err := do(importTaskName(label))
 	p.unwatch(key)
 	return err
 }

@@ -277,8 +277,8 @@ exporter starts the same kind of watchdog at its first create (`--xcpng-restore-
 Each VDI and VM is listed with it before its create is sent, by SR and label or by name
 and label, then by reference once the create answers, and unlisted once it is destroyed
 or kept: a VM is kept, with its disks, once its Secure Boot check passes or holds it
-back, before `VM.start`. Each write into a VDI runs under a xapi task named by a label
-of its own, listed for as long as the write runs, so that a task left by an interrupted
+back, before `VM.start`. Each write into a VDI runs under a xapi task named
+`plakar import_raw_vdi <label>`, with a label of its own, listed for as long as the write runs, so that a task left by an interrupted
 write is destroyed by name. If the pipe closes while something is listed, the watchdog
 destroys the VMs first, then the VDIs and tasks, with the same label searches and retries
 as above. A task a killed watchdog leaves is removed by xapi itself: about an hour after it

@@ -130,7 +130,7 @@ func TestWatchdogDestroysVMsFirst(t *testing.T) {
 // The watchdog destroys the task of an import the plugin was killed in, by its name. A
 // name with no task, the plugin killed before task.create, is nothing to report.
 func TestWatchdogDestroysLabelledTask(t *testing.T) {
-	f := &restoreXAPI{tasks: map[string]string{"OpaqueRef:t1": "T", "OpaqueRef:t2": "other"}}
+	f := &restoreXAPI{tasks: map[string]string{"OpaqueRef:t1": "plakar import_raw_vdi T", "OpaqueRef:t2": "T"}}
 	p := restoreExporter(t, f)
 	out := stderrOf(t, func() {
 		if err := p.destroyListed(context.Background(), []string{taskLabelKey("T"), taskLabelKey("none")}); err != nil {
