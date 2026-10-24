@@ -44,19 +44,29 @@ func destroyedKey(method, ref string) string {
 	return vdiKey(ref)
 }
 
+// startWatchdog starts the restore watchdog; tests replace it.
+var startWatchdog = watchdog.Start
+
 // watch lists key with the watchdog, starting it on first use. Without a watchdog the
 // restore still runs: only the in-process cleanup then covers a failure.
+//
+// Starting it, which comes right before the restore's first create, prints the restore
+// ID and where to look for what it made. Nothing can say it later if the watchdog is
+// killed too: Ctrl-C ends the plugin at once, since it shares plakar's process group,
+// and leaves the watchdog the only process that knows (#56).
 func (p *Exporter) watch(key string) {
 	if p.watchdogLost {
 		return
 	}
 	if p.watchdog == nil {
-		wd, err := watchdog.Start("restore watchdog", WatchdogArg, p.config)
+		wd, err := startWatchdog("restore watchdog", WatchdogArg, p.config)
 		if err != nil {
 			p.loseWatchdog(err)
 			return
 		}
 		p.watchdog = wd
+		fmt.Fprintf(os.Stderr, "xcpng: restore %s: if it and its watchdog are both killed, what it has made "+
+			"and not finished stays on the pool, named by this ID: %s\n", p.restoreID(), leftoverHint())
 	}
 	err := p.watchdog.Add(key)
 	switch {
@@ -74,9 +84,14 @@ func (p *Exporter) watch(key string) {
 func (p *Exporter) loseWatchdog(err error) {
 	p.watchdogLost = true
 	warnf("the restore goes on, but if it is killed from here, what it has made and not finished stays on the pool, "+
-		"named by %[1]s: VMs whose other_config:%[2]s starts with it, VDIs no VM uses whose name or description holds it, "+
-		"and tasks whose name holds it, which xapi removes by itself within a day (%[3]s)",
-		p.restoreID(), restoreMarkerKey, err)
+		"named by %s: %s (%s)", p.restoreID(), leftoverHint(), err)
+}
+
+// leftoverHint says where what a restore leaves is found, by the restore ID named just
+// before it.
+func leftoverHint() string {
+	return "VMs whose other_config:" + restoreMarkerKey + " starts with it, VDIs no VM uses whose name or description " +
+		"holds it, and tasks whose name holds it, which xapi removes by itself within a day"
 }
 
 func (p *Exporter) unwatch(key string) {
