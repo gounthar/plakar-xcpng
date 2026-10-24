@@ -151,7 +151,7 @@ func TestKillAtPausePoints(t *testing.T) {
 // The same, for a restore killed while its disk is being written: the one VDI it made is
 // listed with the watchdog, by its label until VDI.create has answered, or findable.
 func TestKillInsideRestoreDisk(t *testing.T) {
-	for _, phase := range []string{"vdi-created", "vdi-renamed", "vdi-imported"} {
+	for _, phase := range []string{"vdi-created", "vdi-renamed", "task-created", "vdi-imported"} {
 		for _, lost := range []bool{false, true} {
 			name := phase
 			if lost {
@@ -172,9 +172,24 @@ func TestKillInsideRestoreDisk(t *testing.T) {
 					t.Fatalf("left VMs %q and VDIs %q, want one VDI", vms, vdis)
 				}
 				ref := vdis[0]
-				// Each pause point comes before or after an import, whose task is gone then.
-				if left := f.tasksLeft(); len(left) != 0 {
+				// Killed at task-created, the import leaves its task, never used, which
+				// xapi would keep pending for a day: listed by its label, or named with
+				// the restore ID. At the other pause points the task is gone or not made.
+				left := f.tasksLeft()
+				if phase != "task-created" && len(left) != 0 {
 					t.Errorf("tasks %q left", left)
+				}
+				if phase == "task-created" {
+					if len(left) != 1 {
+						t.Fatalf("tasks %q left, want the import's", left)
+					}
+					label, ok := strings.CutPrefix(left[0], "plakar import_raw_vdi ")
+					if lost && (!ok || !strings.HasPrefix(label, p.restoreID()+"-")) {
+						t.Errorf("task %q: the lost-watchdog warning does not lead to it", left[0])
+					}
+					if pending := rec.pending(t); !lost && !slices.Contains(pending, taskLabelKey(label)) {
+						t.Errorf("task %q: not listed with the watchdog (%q)", left[0], pending)
+					}
 				}
 				if lost {
 					if !f.findable(p.restoreID(), ref) {

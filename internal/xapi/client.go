@@ -63,6 +63,11 @@ type Client struct {
 	mu      sync.Mutex
 	base    string // https://host[:port]
 	session string
+
+	// ImportTaskCreated, when set, is called once task.create has answered for an
+	// import, before the import is sent: a lab build pauses there, where a killed
+	// process leaves a task xapi keeps pending for a day.
+	ImportTaskCreated func()
 }
 
 // Dial logs in to the pool master. If the configured host is a pool member, it follows
@@ -336,6 +341,9 @@ func (c *Client) importTask(ctx context.Context, name string) (string, func(), e
 	var task string
 	if err := c.Call(ctx, &task, "task.create", name, ""); err != nil {
 		return "", nil, fmt.Errorf("import_raw_vdi: %w", err)
+	}
+	if c.ImportTaskCreated != nil {
+		c.ImportTaskCreated()
 	}
 	done := func() {
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)

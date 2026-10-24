@@ -87,6 +87,7 @@ func NewExporter(ctx context.Context, opts *connectors.Options, name string, con
 	if err != nil {
 		return nil, err
 	}
+	client.ImportTaskCreated = func() { labPause("task-created") }
 	return &Exporter{cfg: cfg, client: client, opts: o, config: config}, nil
 }
 

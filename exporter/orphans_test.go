@@ -388,6 +388,7 @@ func restoreExporter(t *testing.T, f *restoreXAPI) *Exporter {
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.ImportTaskCreated = func() { labPause("task-created") }
 	return &Exporter{client: c, watchdog: watchdog.FromWriter(&recordWatchdog{})}
 }
 
