@@ -172,6 +172,10 @@ func TestKillInsideRestoreDisk(t *testing.T) {
 					t.Fatalf("left VMs %q and VDIs %q, want one VDI", vms, vdis)
 				}
 				ref := vdis[0]
+				// Each pause point comes before or after an import, whose task is gone then.
+				if left := f.tasksLeft(); len(left) != 0 {
+					t.Errorf("tasks %q left", left)
+				}
 				if lost {
 					if !f.findable(p.restoreID(), ref) {
 						t.Errorf("%s: the lost-watchdog warning does not lead to it", ref)
@@ -185,6 +189,34 @@ func TestKillInsideRestoreDisk(t *testing.T) {
 					t.Errorf("%s: not listed with the watchdog (%q)", ref, pending)
 				}
 			})
+		}
+	}
+}
+
+// A restore killed while it writes a disk leaves the import's task: it is listed by its
+// name for as long as the import runs, and named with the restore ID.
+func TestImportTaskIsListedWhileItRuns(t *testing.T) {
+	f := &restoreXAPI{}
+	p, rec := recordedExporter(t, f)
+	var during []string
+	var names []string
+	f.duringImport = func() {
+		during = rec.pending(t)
+		names = f.tasksLeft()
+	}
+	restoreOneDisk(t, p)
+	if len(names) != 1 || !strings.HasPrefix(names[0], p.restoreID()+"-") {
+		t.Fatalf("tasks during the import %q, want one named under %s", names, p.restoreID())
+	}
+	if !slices.Contains(during, taskLabelKey(names[0])) {
+		t.Errorf("listed %q during the import, want %s", during, taskLabelKey(names[0]))
+	}
+	if left := f.tasksLeft(); len(left) != 0 {
+		t.Errorf("tasks %q left after the import", left)
+	}
+	for _, key := range rec.pending(t) {
+		if strings.HasPrefix(key, "task-label/") {
+			t.Errorf("%s still listed after the import", key)
 		}
 	}
 }

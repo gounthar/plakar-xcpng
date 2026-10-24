@@ -15,7 +15,7 @@ func TestHandlerErrorsDoNotLeakSession(t *testing.T) {
 		t.Fatalf("export error leaks the session or is nil: %v", err)
 	}
 
-	err = c.ImportRawVDI(context.Background(), "OpaqueRef:vdi", 4, strings.NewReader("data"))
+	err = c.ImportRawVDI(context.Background(), "OpaqueRef:vdi", 4, strings.NewReader("data"), "")
 	if err == nil || strings.Contains(err.Error(), "secret-session") {
 		t.Fatalf("import error leaks the session or is nil: %v", err)
 	}

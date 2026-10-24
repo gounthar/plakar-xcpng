@@ -247,6 +247,39 @@ func (p *Exporter) destroyLabelledVDI(ctx context.Context, srRef, label string) 
 	return nil
 }
 
+// destroyLabelledTask destroys the xapi tasks named label. A task still running is only
+// marked by task.destroy, and xapi removes it once it has ended (destroy in
+// xapi_task.ml, timeout_tasks in db_gc_util.ml): an import whose connection was cut
+// fails. It returns errGone when no task has the name. A task.create that had not
+// reached xapi when the plugin died may still make one after this has looked; that
+// task is never used and xapi removes it a day later.
+func (p *Exporter) destroyLabelledTask(ctx context.Context, label string) error {
+	n := 0
+	err := p.retry(ctx, cleanupRetry, func(ctx context.Context, _ int) error {
+		var refs []string
+		if err := p.client.Call(ctx, &refs, "task.get_by_name_label", label); err != nil {
+			return err
+		}
+		var errs []error
+		for _, ref := range refs {
+			err := p.client.Call(ctx, nil, "task.destroy", ref)
+			if err == nil {
+				n++
+			} else if !xapi.IsCode(err, "HANDLE_INVALID") { // else destroyed since the list was read
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
+	})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errGone
+	}
+	return nil
+}
+
 // destroyMarkedVM destroys the VM named name whose other_config marks it with label,
 // looking again until vmCreateWait in case xapi has not created it yet.
 func (p *Exporter) destroyMarkedVM(ctx context.Context, name, label string) error {

@@ -20,15 +20,18 @@ import (
 //
 // Every VDI and VM the restore makes is listed from before its create is sent until it
 // is kept as part of a restored VM or destroyed, so a plugin killed in between, which is
-// what an interrupted plakar does, leaves nothing behind. A key says what it names:
+// what an interrupted plakar does, leaves nothing behind. So is the xapi task each
+// write into a VDI runs under, for as long as the write runs. A key says what it names:
 // "vdi/<ref>" and "vm/<ref>" once the create has answered, "vdi-label/<SR ref>/<label>"
-// and "vm-label/<label>/<VM name, Go-quoted>" while it has not. A reference never
-// holds a slash, nor does a label, so the VM name, which may, comes last.
+// and "vm-label/<label>/<VM name, Go-quoted>" while it has not, and "task-label/<label>"
+// for a task, by its name. A reference never holds a slash, nor does a label, so the
+// VM name, which may, comes last.
 const WatchdogArg = "--xcpng-restore-watchdog"
 
 func vdiKey(ref string) string               { return "vdi/" + ref }
 func vmKey(ref string) string                { return "vm/" + ref }
 func vdiLabelKey(srRef, label string) string { return "vdi-label/" + srRef + "/" + label }
+func taskLabelKey(label string) string       { return "task-label/" + label }
 
 // vmLabelKey quotes the VM name, which comes from the backup's vm.json, so that a
 // name holding a line break cannot write protocol lines of its own.
@@ -71,7 +74,8 @@ func (p *Exporter) watch(key string) {
 func (p *Exporter) loseWatchdog(err error) {
 	p.watchdogLost = true
 	warnf("the restore goes on, but if it is killed from here, what it has made and not finished stays on the pool, "+
-		"named by %[1]s: VMs whose other_config:%[2]s starts with it, and VDIs no VM uses whose name or description holds it (%[3]s)",
+		"named by %[1]s: VMs whose other_config:%[2]s starts with it, VDIs no VM uses whose name or description holds it, "+
+		"and tasks whose name starts with it, which xapi removes by itself within a day (%[3]s)",
 		p.restoreID(), restoreMarkerKey, err)
 }
 
@@ -79,6 +83,21 @@ func (p *Exporter) unwatch(key string) {
 	if p.watchdog != nil {
 		_ = p.watchdog.Remove(key)
 	}
+}
+
+// importing runs do, a write into a VDI, under a xapi task named by a label of its own,
+// listed with the watchdog from before the task is created until do returns. By then
+// the import has destroyed its task; if that destroy failed, the task is left to xapi,
+// which removes a finished task about an hour after it ended (completed_task_timeout
+// in xapi_globs.ml). Killed before do returns, the plugin leaves the task to the
+// watchdog: a task created but never used stays pending, which xapi keeps for a day.
+func (p *Exporter) importing(do func(task string) error) error {
+	label := p.restoreLabel()
+	key := taskLabelKey(label)
+	p.watch(key)
+	err := do(label)
+	p.unwatch(key)
+	return err
 }
 
 // keep unlists a VM the restore keeps, and its disks: from here a killed plugin must
@@ -219,6 +238,8 @@ func (p *Exporter) destroyKey(ctx context.Context, key string) error {
 	case "vdi-label":
 		srRef, label, _ := strings.Cut(rest, "/")
 		return p.destroyLabelledVDI(ctx, srRef, label)
+	case "task-label":
+		return p.destroyLabelledTask(ctx, rest)
 	case "vm-label":
 		label, quoted, _ := strings.Cut(rest, "/")
 		name, err := strconv.Unquote(quoted)
