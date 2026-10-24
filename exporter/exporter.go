@@ -361,11 +361,13 @@ func (p *Exporter) restoreDisk(ctx context.Context, srRef string, sparse bool, n
 	}
 	labPause("vdi-renamed")
 
-	if sparse {
-		_, err = p.client.ImportSparseVDI(ctx, ref, size, r)
-	} else {
-		err = p.client.ImportRawVDI(ctx, ref, size, r)
-	}
+	err = p.importing(func(task string) error {
+		if sparse {
+			_, err := p.client.ImportSparseVDI(ctx, ref, size, r, task)
+			return err
+		}
+		return p.client.ImportRawVDI(ctx, ref, size, r, task)
+	})
 	if err != nil {
 		if derr := p.client.Call(context.WithoutCancel(ctx), nil, "VDI.destroy", ref); derr != nil {
 			err = errors.Join(err, derr)
@@ -641,7 +643,9 @@ func (p *Exporter) checkDiskSizes(ctx context.Context, vm pendingVM, restored ma
 		if disk.cut != nil && disk.stored == d.VirtualSize {
 			// The disk is complete, so what shortTail took for xapi's error page
 			// is the guest's own data: put it back as it was stored.
-			if err := p.client.WriteVDIAt(ctx, disk.ref, disk.kept, disk.cut); err != nil {
+			if err := p.importing(func(task string) error {
+				return p.client.WriteVDIAt(ctx, disk.ref, disk.kept, disk.cut, task)
+			}); err != nil {
 				errs = append(errs, fmt.Errorf("writing back the last %d bytes of disk %s of %s: %w", len(disk.cut), d.File, vm.dir, err))
 			}
 			continue

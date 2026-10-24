@@ -124,6 +124,24 @@ type restoreXAPI struct {
 	// afterHeld does so once heldFor has run out, instead of destroying.
 	dropDestroy bool
 	afterHeld   bool
+	// tasks holds each task.create's name by ref; tasksDestroyed, the refs task.destroy
+	// was called on. duringImport, when set, runs as an import request arrives.
+	tasks          map[string]string
+	tasksDestroyed []string
+	duringImport   func()
+}
+
+// tasksLeft returns the names of the tasks never destroyed.
+func (f *restoreXAPI) tasksLeft() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var left []string
+	for ref, name := range f.tasks {
+		if !slices.Contains(f.tasksDestroyed, ref) {
+			left = append(left, name)
+		}
+	}
+	return left
 }
 
 // checkID records ref when a rename leaves it with no restore ID in its name or
@@ -140,6 +158,9 @@ func (f *restoreXAPI) checkID(ref string) {
 
 func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/import_raw_vdi" {
+		if f.duringImport != nil {
+			f.duringImport()
+		}
 		(&destroyRecorder{}).recordImport(w, r)
 		return
 	}
@@ -184,10 +205,24 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.logins++
 		result = "OpaqueRef:session"
 	case "task.create":
-		result = "OpaqueRef:task"
+		if f.tasks == nil {
+			f.tasks = map[string]string{}
+		}
+		ref := fmt.Sprintf("OpaqueRef:task%d", len(f.tasks))
+		f.tasks[ref] = str(1)
+		result = ref
 	case "task.get_status":
 		result = "success"
+	case "task.get_by_name_label":
+		refs := []string{}
+		for ref, name := range f.tasks {
+			if name == str(1) && !slices.Contains(f.tasksDestroyed, ref) {
+				refs = append(refs, ref)
+			}
+		}
+		result = refs
 	case "task.destroy":
+		f.tasksDestroyed = append(f.tasksDestroyed, str(1))
 	case "VDI.create":
 		if f.refuseVDI {
 			xapiErr("SR_BACKEND_FAILURE")
