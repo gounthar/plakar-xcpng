@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"slices"
 	"strconv"
@@ -44,6 +45,10 @@ func destroyedKey(method, ref string) string {
 	return vdiKey(ref)
 }
 
+// watchdogRestoreID is the key, in the configuration the watchdog is given, of the
+// restore ID: it names what the watchdog leaves (#83).
+const watchdogRestoreID = "watchdog_restore_id"
+
 // startWatchdog starts the restore watchdog; tests replace it.
 var startWatchdog = watchdog.Start
 
@@ -59,7 +64,12 @@ func (p *Exporter) watch(key string) {
 		return
 	}
 	if p.watchdog == nil {
-		wd, err := startWatchdog("restore watchdog", WatchdogArg, p.config)
+		config := maps.Clone(p.config)
+		if config == nil {
+			config = map[string]string{}
+		}
+		config[watchdogRestoreID] = p.restoreID()
+		wd, err := startWatchdog("restore watchdog", WatchdogArg, config)
 		if err != nil {
 			p.loseWatchdog(err)
 			return
@@ -150,25 +160,66 @@ func RunWatchdog(stdin io.Reader) int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), watchdog.CleanupTimeout)
 	defer cancel()
-	if err := destroyLeftovers(ctx, config, pending); err != nil {
-		fmt.Fprintf(os.Stderr, "xcpng: restore watchdog: %s\n", err)
-		return 1
+	return runWatchdog(ctx, os.Stderr, config, pending)
+}
+
+// runWatchdog destroys what the plugin left listed. What it could not destroy it tells
+// w, a line each, then that it stopped trying and where what it names is found: the
+// restore's own output said so when it started, but long enough ago to be lost (#83).
+func runWatchdog(ctx context.Context, w io.Writer, config map[string]string, pending []string) int {
+	start := time.Now()
+	err := destroyLeftovers(ctx, config, pending)
+	if err == nil {
+		return 0
 	}
-	return 0
+	for _, line := range strings.Split(err.Error(), "\n") {
+		_, _ = fmt.Fprintf(w, "xcpng: restore watchdog: %s\n", line)
+	}
+	where := ""
+	if id := config[watchdogRestoreID]; id != "" {
+		where = fmt.Sprintf(", named by restore %s: %s", id, leftoverHint())
+	}
+	_, _ = fmt.Fprintf(w, "xcpng: restore watchdog: stopped trying after %s; what it names above stays on the pool%s\n",
+		time.Since(start).Round(time.Second), where)
+	return 1
 }
 
 func destroyLeftovers(ctx context.Context, config map[string]string, keys []string) error {
 	cfg, err := xapi.ParseConfig(config)
 	if err != nil {
-		return err
+		return notTried(err, keys)
 	}
 	client, err := xapi.Dial(ctx, cfg)
 	if err != nil {
-		return err
+		return notTried(err, keys)
 	}
 	p := &Exporter{cfg: cfg, client: client}
-	return errors.Join(p.destroyListed(ctx, keys), client.Close(ctx))
+	err = p.destroyListed(ctx, keys)
+	logOut(ctx, client)
+	return err
 }
+
+// notTried is err, then each key, named as left untried: what runWatchdog says
+// stays on the pool must be named even when no destroy was sent.
+func notTried(err error, keys []string) error {
+	errs := []error{err}
+	for _, key := range keys {
+		errs = append(errs, fmt.Errorf("%s: not tried", key))
+	}
+	return errors.Join(errs...)
+}
+
+// logOut closes the watchdog's session, with a few seconds of its own: ctx may be over
+// already, the watchdog's time spent on a VDI xapi kept. Its error is dropped, as the
+// session goes with the process anyway and xapi ends it in time.
+func logOut(ctx context.Context, client *xapi.Client) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), logoutTimeout)
+	defer cancel()
+	_ = client.Close(ctx)
+}
+
+// logoutTimeout bounds the watchdog's logout.
+const logoutTimeout = 5 * time.Second
 
 // destroyListed destroys what the watchdog still lists, VMs first: VM.destroy leaves
 // the VDIs, which then have no VBD left to hold them.
@@ -197,8 +248,8 @@ func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {
 	last := map[string]error{}
 	try := func(key string) {
 		// Once the watchdog's time is up, name what is left instead of trying it.
-		if err := ctx.Err(); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", key, err))
+		if ctx.Err() != nil {
+			errs = append(errs, fmt.Errorf("%s: not tried, the watchdog's time was up", key))
 			return
 		}
 		switch err := p.destroyKey(ctx, key); {
@@ -208,8 +259,13 @@ func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {
 		case errors.Is(err, errGone):
 		case err != nil:
 			// A try cut short by the watchdog's time says nothing of why the key was
-			// put aside, so the busy answer before it is kept.
-			errs = append(errs, fmt.Errorf("%s: %w", key, errors.Join(last[key], err)))
+			// put aside, so the busy answer before it stands for it.
+			if timeUp(ctx) && last[key] != nil {
+				err = last[key]
+			} else {
+				err = errors.Join(last[key], err)
+			}
+			errs = append(errs, fmt.Errorf("%s: %w", key, err))
 		default:
 			fmt.Fprintf(os.Stderr, "xcpng: cleaned up %s left by the restore\n", key)
 		}
@@ -231,10 +287,18 @@ func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {
 			try(key)
 		}
 	}
+	// The end of the watchdog's time is said once, by runWatchdog, not after each key.
 	for _, key := range busy {
-		errs = append(errs, fmt.Errorf("%s: %w", key, errors.Join(last[key], ctx.Err())))
+		errs = append(errs, fmt.Errorf("%s: %w", key, last[key]))
 	}
 	return errors.Join(errs...)
+}
+
+// timeUp reports whether the watchdog's time is up, by the clock as well as by ctx: a
+// try bounded by that time (see destroyKey) can return a moment before ctx says so.
+func timeUp(ctx context.Context) bool {
+	d, ok := ctx.Deadline()
+	return ctx.Err() != nil || ok && !time.Now().Before(d)
 }
 
 // errGone is what destroyKey returns for a key with nothing left to destroy.

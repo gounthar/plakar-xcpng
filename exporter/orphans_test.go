@@ -112,6 +112,7 @@ type restoreXAPI struct {
 	hangOnce        bool
 	refuseVM        bool
 	logins          int
+	logouts         int
 	// inUse answers that many VDI.destroy calls with VDI_IN_USE, as xapi does for a
 	// moment after an import's connection is cut.
 	inUse int
@@ -212,6 +213,8 @@ func (f *restoreXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "session.login_with_password":
 		f.logins++
 		result = "OpaqueRef:session"
+	case "session.logout":
+		f.logouts++
 	case "task.create":
 		if f.tasks == nil {
 			f.tasks = map[string]string{}
