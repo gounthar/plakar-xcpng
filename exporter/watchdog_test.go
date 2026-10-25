@@ -1,9 +1,11 @@
 package exporter
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"net/http/httptest"
 	"os"
 	"slices"
 	"strings"
@@ -460,10 +462,12 @@ func TestRestoreIDIsSaidWhenTheWatchdogStarts(t *testing.T) {
 	f := &restoreXAPI{}
 	createsBefore := -1
 	old := startWatchdog
-	startWatchdog = func(string, string, map[string]string) (*watchdog.Watchdog, error) {
+	var given map[string]string
+	startWatchdog = func(_, _ string, config map[string]string) (*watchdog.Watchdog, error) {
 		f.mu.Lock()
 		createsBefore = len(f.vdiDescs)
 		f.mu.Unlock()
+		given = config
 		return watchdog.FromWriter(&recordWatchdog{}), nil
 	}
 	t.Cleanup(func() { startWatchdog = old })
@@ -482,6 +486,64 @@ func TestRestoreIDIsSaidWhenTheWatchdogStarts(t *testing.T) {
 	}
 	if !strings.Contains(out, "other_config:"+restoreMarkerKey) || strings.Contains(out, "warning") {
 		t.Errorf("not where to look, or said as a warning:\n%s", out)
+	}
+	if given[watchdogRestoreID] != p.restoreID() {
+		t.Errorf("the watchdog was given restore ID %q, want %q", given[watchdogRestoreID], p.restoreID())
+	}
+}
+
+// A watchdog whose time runs out with a VDI still held says it stopped trying, names
+// the VDI and why, and where to find it by the restore ID. It prints no bare deadline
+// error, nor the logout's: that one is sent after the watchdog's time is up (#83).
+func TestWatchdogGivingUpSaysWhatItLeaves(t *testing.T) {
+	old := restorePollDelay
+	restorePollDelay = time.Millisecond
+	t.Cleanup(func() { restorePollDelay = old })
+	f := &restoreXAPI{held: map[string]bool{"OpaqueRef:held": true}}
+	srv := httptest.NewTLSServer(f)
+	t.Cleanup(srv.Close)
+	config := map[string]string{
+		"location":        xapi.Protocol + "://" + strings.TrimPrefix(srv.URL, "https://"),
+		"tls_insecure":    "true",
+		watchdogRestoreID: "plakar-restore-20261024T204827Z-968f4dbb",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	var out bytes.Buffer
+	if code := runWatchdog(ctx, &out, config, []string{"vdi/OpaqueRef:held"}); code != 1 {
+		t.Fatalf("exit status %d, want 1", code)
+	}
+	got := out.String()
+	for _, line := range strings.Split(strings.TrimSuffix(got, "\n"), "\n") {
+		if !strings.HasPrefix(line, "xcpng: restore watchdog: ") {
+			t.Errorf("line %q does not say it is the watchdog's", line)
+		}
+	}
+	for _, want := range []string{"vdi/OpaqueRef:held", "VDI_IN_USE", "stopped trying after",
+		"plakar-restore-20261024T204827Z-968f4dbb", leftoverHint()} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output does not say %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"context deadline exceeded", "session.logout"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("output says %q:\n%s", unwanted, got)
+		}
+	}
+}
+
+// Logging out after the watchdog's time is up gets a moment of its own: the session
+// is closed rather than left to expire on the host.
+func TestWatchdogLogsOutPastItsTime(t *testing.T) {
+	f := &restoreXAPI{}
+	p := restoreExporter(t, f)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	logOut(ctx, p.client)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.logouts != 1 {
+		t.Fatalf("%d session.logout calls after the watchdog's time, want 1", f.logouts)
 	}
 }
 
