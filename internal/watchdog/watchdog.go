@@ -40,7 +40,7 @@ type Watchdog struct {
 	name string
 	mu   sync.Mutex
 	w    io.WriteCloser
-	done chan struct{}
+	done <-chan struct{} // closed once the child has exited
 }
 
 // Start starts the watchdog child: this executable, run with arg as its first argument.
@@ -66,10 +66,11 @@ func Start(name, arg string, config map[string]string) (*Watchdog, error) {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 
-	wd := &Watchdog{name: name, w: w, done: make(chan struct{})}
+	done := make(chan struct{})
+	wd := &Watchdog{name: name, w: w, done: done}
 	go func() {
 		_ = cmd.Wait()
-		close(wd.done)
+		close(done)
 	}()
 	if err := wd.send(string(line)); err != nil {
 		_ = w.Close()
@@ -83,6 +84,11 @@ func Start(name, arg string, config map[string]string) (*Watchdog, error) {
 func FromWriter(w io.WriteCloser) *Watchdog {
 	done := make(chan struct{})
 	close(done)
+	return FromWriterUntil(w, done)
+}
+
+// FromWriterUntil is FromWriter for a watchdog that exits only once done is closed.
+func FromWriterUntil(w io.WriteCloser, done <-chan struct{}) *Watchdog {
 	return &Watchdog{name: "watchdog", w: w, done: done}
 }
 
@@ -129,15 +135,25 @@ func (wd *Watchdog) sendKey(op byte, key string) error {
 // Close tells the watchdog the plugin is done. Objects still listed are destroyed by
 // the watchdog, so this waits for it, within a bound.
 func (wd *Watchdog) Close() error {
-	wd.mu.Lock()
-	err := wd.w.Close()
-	wd.mu.Unlock()
-	select {
-	case <-wd.done:
-	case <-time.After(CleanupTimeout):
+	exited, err := wd.CloseWithin(CleanupTimeout)
+	if !exited {
 		err = errors.Join(err, fmt.Errorf("%s did not exit", wd.name))
 	}
 	return err
+}
+
+// CloseWithin is Close with its own bound, and reports whether the watchdog exited
+// within it. One that has not goes on with its cleanup by itself.
+func (wd *Watchdog) CloseWithin(d time.Duration) (exited bool, err error) {
+	wd.mu.Lock()
+	err = wd.w.Close()
+	wd.mu.Unlock()
+	select {
+	case <-wd.done:
+		return true, err
+	case <-time.After(d):
+		return false, err
+	}
 }
 
 // Read reads the protocol until end of input and returns the configuration and the

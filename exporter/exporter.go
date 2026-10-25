@@ -104,12 +104,26 @@ func (p *Exporter) Ping(ctx context.Context) error {
 	return p.client.Call(ctx, nil, "pool.get_all")
 }
 
+// closeWait bounds how long Close waits for the restore watchdog: long enough for the
+// usual hold after a cut import, about a second (see restoreWait). Past it the watchdog
+// goes on by itself, so a disk xapi keeps holding does not keep plakar running for the
+// watchdog's ten minutes (#85). Where plakar's exit kills what it leaves running
+// (KillMode=mixed, a container whose first process is plakar), the watchdog dies then,
+// and what it had not destroyed stays, named by the restore ID printed here.
+var closeWait = 30 * time.Second
+
 func (p *Exporter) Close(ctx context.Context) error {
 	var errs []error
 	if p.watchdog != nil {
+		exited, err := p.watchdog.CloseWithin(closeWait)
 		// A lost watchdog was reported when it went: closing it only fails again.
-		if err := p.watchdog.Close(); !p.watchdogLost {
+		if !p.watchdogLost {
 			errs = append(errs, err)
+			if !exited {
+				fmt.Fprintf(os.Stderr, "xcpng: restore %s: the restore watchdog goes on in the background with what "+
+					"the restore left, and says what it cleans up; if it is killed, that stays on the pool, named by this ID: %s\n",
+					p.restoreID(), leftoverHint())
+			}
 		}
 		p.watchdog = nil
 	}
