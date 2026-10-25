@@ -308,7 +308,10 @@ name (`<n>-<VDI UUID>.raw`). Starting the watchdog prints the restore ID,
 `plakar-restore-<time>-<random>`, which every label starts with and every restored VDI's
 description holds. It has to be said then: Ctrl-C ends the exporter at once, since it is in
 plakar's process group, so once the watchdog is killed too, no process is left to say it
-(#56: disk 0 left, nothing printed).
+(#56: disk 0 left, nothing printed). A watchdog whose 10 minutes run out names each object
+it could not destroy and why, then says it stopped trying and where those objects are
+found by that ID, which the restore printed too long before to be at hand (#83). It logs
+out with a few seconds of its own, its time being spent, and drops that error.
 
 The restored VM is always a new VM. The prototype never overwrites an existing one.
 
