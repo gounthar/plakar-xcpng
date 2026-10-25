@@ -532,6 +532,21 @@ func TestWatchdogGivingUpSaysWhatItLeaves(t *testing.T) {
 	}
 }
 
+// A watchdog that cannot reach xapi still names each object it leaves.
+func TestWatchdogThatCannotConnectNamesWhatItLeaves(t *testing.T) {
+	config := map[string]string{"location": "nowhere", watchdogRestoreID: "plakar-restore-X"}
+	keys := []string{"vdi/OpaqueRef:a", "task-label/T"}
+	var out bytes.Buffer
+	if code := runWatchdog(context.Background(), &out, config, keys); code != 1 {
+		t.Fatalf("exit status %d, want 1", code)
+	}
+	for _, key := range keys {
+		if !strings.Contains(out.String(), "xcpng: restore watchdog: "+key+": not tried") {
+			t.Errorf("output does not name %s:\n%s", key, out.String())
+		}
+	}
+}
+
 // Logging out after the watchdog's time is up gets a moment of its own: the session
 // is closed rather than left to expire on the host.
 func TestWatchdogLogsOutPastItsTime(t *testing.T) {

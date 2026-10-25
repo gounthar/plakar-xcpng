@@ -187,16 +187,26 @@ func runWatchdog(ctx context.Context, w io.Writer, config map[string]string, pen
 func destroyLeftovers(ctx context.Context, config map[string]string, keys []string) error {
 	cfg, err := xapi.ParseConfig(config)
 	if err != nil {
-		return err
+		return notTried(err, keys)
 	}
 	client, err := xapi.Dial(ctx, cfg)
 	if err != nil {
-		return err
+		return notTried(err, keys)
 	}
 	p := &Exporter{cfg: cfg, client: client}
 	err = p.destroyListed(ctx, keys)
 	logOut(ctx, client)
 	return err
+}
+
+// notTried is err, then each key, named as left untried: what runWatchdog says
+// stays on the pool must be named even when no destroy was sent.
+func notTried(err error, keys []string) error {
+	errs := []error{err}
+	for _, key := range keys {
+		errs = append(errs, fmt.Errorf("%s: not tried", key))
+	}
+	return errors.Join(errs...)
 }
 
 // logOut closes the watchdog's session, with a few seconds of its own: ctx may be over
@@ -250,7 +260,7 @@ func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {
 		case err != nil:
 			// A try cut short by the watchdog's time says nothing of why the key was
 			// put aside, so the busy answer before it stands for it.
-			if ctx.Err() != nil && last[key] != nil {
+			if timeUp(ctx) && last[key] != nil {
 				err = last[key]
 			} else {
 				err = errors.Join(last[key], err)
@@ -282,6 +292,13 @@ func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {
 		errs = append(errs, fmt.Errorf("%s: %w", key, last[key]))
 	}
 	return errors.Join(errs...)
+}
+
+// timeUp reports whether the watchdog's time is up, by the clock as well as by ctx: a
+// try bounded by that time (see destroyKey) can return a moment before ctx says so.
+func timeUp(ctx context.Context) bool {
+	d, ok := ctx.Deadline()
+	return ctx.Err() != nil || ok && !time.Now().Before(d)
 }
 
 // errGone is what destroyKey returns for a key with nothing left to destroy.
