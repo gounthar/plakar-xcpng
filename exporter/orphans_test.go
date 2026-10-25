@@ -722,6 +722,27 @@ func TestDisksOfAFailedVMAreReportedFailed(t *testing.T) {
 	}
 }
 
+// A disk of a failed VM whose VDI xapi still holds says so, not that it was destroyed
+// with its VM (#82); the one destroyed still says it was.
+func TestHeldDiskOfAFailedVMSaysItWasNotDestroyed(t *testing.T) {
+	old := heldWait
+	heldWait = 50 * time.Millisecond
+	t.Cleanup(func() { heldWait = old })
+	f := &restoreXAPI{refuseVM: true, held: map[string]bool{"OpaqueRef:vdi0": true}}
+	p := restoreExporter(t, f)
+	p.opts.srUUID = "sr-uuid"
+
+	got := exportRecords(t, p, diskIn("/vm", "a"), diskIn("/vm", "b"), metaRecord(t, "/vm", vmJSON(t, "a", "b")))
+	err := got["/vm/"+xapi.DiskFilename("0", "a")]
+	if err == nil || !strings.Contains(err.Error(), "VDI_IN_USE") || strings.Contains(err.Error(), "destroyed with it") {
+		t.Fatalf("held disk result %v, want its destroy error", err)
+	}
+	err = got["/vm/"+xapi.DiskFilename("0", "b")]
+	if err == nil || !strings.Contains(err.Error(), "destroyed with it") {
+		t.Fatalf("destroyed disk result %v, want it said destroyed", err)
+	}
+}
+
 func TestDiskBesideUnreadableVMJSONSaysSo(t *testing.T) {
 	f := &restoreXAPI{}
 	p := restoreExporter(t, f)
