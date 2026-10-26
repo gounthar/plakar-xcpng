@@ -486,7 +486,12 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 	labPause("attached")
 	// The marker stays until the VM is kept: a restore killed before that, with no
 	// watchdog left, leaves a VM that only the marker names (see loseWatchdog).
-	unmark := func() {
+	// The disks are renamed then too, never before: a disk xapi holds when its VM
+	// fails stays, and the restore ID in its description is what finds it (#90).
+	keep := func() {
+		p.keep(vmRef, vm, restored)
+		labPause("kept")
+		p.nameDisks(ctx, name, vm, restored)
 		if err := p.client.Call(ctx, nil, "VM.remove_from_other_config", vmRef, restoreMarkerKey); err != nil {
 			warnf("VM %q: removing other_config:%s: %s", name, restoreMarkerKey, err)
 		}
@@ -504,18 +509,14 @@ func (p *Exporter) createVM(ctx context.Context, vm pendingVM, restored map[stri
 	if err := p.checkSecureBoot(ctx, vmRef, name); err != nil {
 		var held *heldError
 		if errors.As(err, &held) {
-			p.keep(vmRef, vm, restored)
-			labPause("kept")
-			unmark()
+			keep()
 			return err
 		}
 		// A VM whose Secure Boot state was not checked is not restored.
 		return errors.Join(err, p.destroyVM(ctx, vmRef), p.destroyDisks(ctx, vm, restored))
 	}
 	// Kept from here, started or not: a VM.start that fails holds it back.
-	p.keep(vmRef, vm, restored)
-	labPause("kept")
-	unmark()
+	keep()
 
 	if p.opts.startOnRestore {
 		if err := p.client.Call(ctx, nil, "VM.start", vmRef, false, false); err != nil {
@@ -734,6 +735,23 @@ func (p *Exporter) destroyDisks(ctx context.Context, vm pendingVM, restored map[
 	return errors.Join(errs...)
 }
 
+// nameDisks gives a kept VM's disks the names and descriptions they were backed up
+// with. The VM is kept whatever this answers.
+func (p *Exporter) nameDisks(ctx context.Context, name string, vm pendingVM, restored map[string]restoredDisk) {
+	for _, d := range vm.meta.Disks {
+		disk, ok := restored[vm.dir+"/"+d.VDIUUID]
+		if !ok {
+			continue
+		}
+		if err := p.client.Call(ctx, nil, "VDI.set_name_label", disk.ref, d.NameLabel); err != nil {
+			warnf("VM %q: disk %s keeps the name the restore gave it, not %q: %s", name, d.File, d.NameLabel, err)
+		}
+		if err := p.client.Call(ctx, nil, "VDI.set_name_description", disk.ref, d.NameDescription); err != nil {
+			warnf("VM %q: disk %s keeps the description the restore gave it, not %q: %s", name, d.File, d.NameDescription, err)
+		}
+	}
+}
+
 func (p *Exporter) attach(ctx context.Context, vmRef string, vm pendingVM, restored map[string]restoredDisk) error {
 	for _, d := range vm.meta.Disks {
 		disk, ok := restored[vm.dir+"/"+d.VDIUUID]
@@ -757,15 +775,7 @@ func (p *Exporter) attach(ctx context.Context, vmRef string, vm pendingVM, resto
 		if err != nil {
 			return err
 		}
-		// Renamed only once attached: until then the restore ID in its description is
-		// what finds it after a kill with no watchdog left (see loseWatchdog).
 		labPause("vbd-created")
-		if err := p.client.Call(ctx, nil, "VDI.set_name_label", vdiRef, d.NameLabel); err != nil {
-			return err
-		}
-		if err := p.client.Call(ctx, nil, "VDI.set_name_description", vdiRef, d.NameDescription); err != nil {
-			return err
-		}
 	}
 
 	for _, v := range vm.meta.VIFs {

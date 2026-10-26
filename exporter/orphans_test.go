@@ -787,3 +787,49 @@ func TestFailedStartKeepsVMAndReportsDisksRestored(t *testing.T) {
 		t.Fatalf("destroyed %v: a VM that only failed to start is kept", f.destroyed)
 	}
 }
+
+// A disk xapi still holds when its VM fails after attach stays behind, and keeps the
+// restore ID that the lost-watchdog warning finds it by (#90).
+func TestHeldDiskOfAVMFailedAfterAttachKeepsTheRestoreID(t *testing.T) {
+	oldHeld, oldRetry := heldWait, cleanupRetry
+	heldWait, cleanupRetry = 50*time.Millisecond, time.Second
+	t.Cleanup(func() { heldWait, cleanupRetry = oldHeld, oldRetry })
+	f := &restoreXAPI{dropSB: true, held: map[string]bool{"OpaqueRef:vdi0": true}}
+	p := restoreExporter(t, f)
+	restored := restoreOneDisk(t, p)
+
+	if err := p.createVM(context.Background(), sbVM, restored, true); err == nil {
+		t.Fatal("createVM succeeded although the Secure Boot check got no answer")
+	}
+	ref := restored["/vm/a"].ref
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if slices.Contains(f.destroyed, ref) {
+		t.Fatalf("%s destroyed although xapi holds it", ref)
+	}
+	if id := p.restoreID(); !strings.Contains(f.vdiLabels[ref], id) && !strings.Contains(f.vdiDesc[ref], id) {
+		t.Fatalf("%s left as %q / %q, neither holds the restore ID %s", ref, f.vdiLabels[ref], f.vdiDesc[ref], id)
+	}
+}
+
+// A kept VM's disks get the names they were backed up with, also when the VM is held
+// back for Secure Boot.
+func TestKeptVMDisksGetTheirNames(t *testing.T) {
+	for _, readiness := range []string{"", "first_boot"} {
+		t.Run(readiness, func(t *testing.T) {
+			f := &restoreXAPI{sbReadiness: readiness}
+			p := restoreExporter(t, f)
+			restored := restoreOneDisk(t, p)
+			vm := sbVM
+			vm.meta.Disks = []xapi.DiskMeta{{File: "disk-0", VDIUUID: "a", VirtualSize: 4096, NameLabel: "web-root", NameDescription: "root disk"}}
+
+			_ = p.createVM(context.Background(), vm, restored, true)
+			ref := restored["/vm/a"].ref
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if f.vdiLabels[ref] != "web-root" || f.vdiDesc[ref] != "root disk" {
+				t.Fatalf("%s named %q / %q, want web-root / root disk", ref, f.vdiLabels[ref], f.vdiDesc[ref])
+			}
+		})
+	}
+}
