@@ -23,7 +23,7 @@ func TestIsWatchdog(t *testing.T) {
 }
 
 // hangingLookupXAPI logs in, then never answers VM.get_by_uuid, as a host that stopped
-// answering; it counts the session.logout calls it gets.
+// answering; it counts the session.logout calls it gets, and fails each of them.
 type hangingLookupXAPI struct {
 	mu      sync.Mutex
 	logouts int
@@ -44,7 +44,9 @@ func (f *hangingLookupXAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.logouts++
 		f.mu.Unlock()
-		_ = json.NewEncoder(w).Encode(map[string]any{"result": ""})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{"code": 1, "message": "LOGOUT_FAILED", "data": []string{}},
+		})
 	default:
 		<-r.Context().Done()
 	}
@@ -66,7 +68,7 @@ func TestSnapshotWatchdogLogsOutPastItsTime(t *testing.T) {
 	if err == nil {
 		t.Fatal("no error for a snapshot left untried")
 	}
-	if strings.Contains(err.Error(), "session.logout") {
+	if strings.Contains(err.Error(), "session.logout") || strings.Contains(err.Error(), "LOGOUT_FAILED") {
 		t.Errorf("error names the logout: %v", err)
 	}
 	f.mu.Lock()
