@@ -276,7 +276,8 @@ for up to 3 minutes while xapi does not answer, with a new session after a tools
 restart, and each attempt has its own one-minute bound. Measured on XCP-ng 8.3.0 (xapi-core 26.1.19): a `VDI.create` cut at 50 to 200 ms was
 finished by xapi each time and found; a `VM.create` cut at 1 ms was found within 20 ms.
 Not covered: xapi stopping between the SM's create and the VDI's record (an `SR.scan`
-brings the volume back), and a cleanup call that itself fails, which the result names.
+brings the volume back), and a cleanup call that itself fails, which the result names:
+the VM's, and for a VDI that could not be destroyed, its disk's own.
 A VM that is made but fails `VM.start` is kept: it is complete, only not running.
 
 An interrupted plakar kills the exporter with SIGKILL, as it does the importer, so the

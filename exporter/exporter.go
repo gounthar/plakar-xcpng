@@ -55,6 +55,9 @@ type Exporter struct {
 	// pendingSince holds, for the watchdog, when it first found each task still
 	// pending (see destroyLabelledTask).
 	pendingSince map[string]time.Time
+	// notDestroyed holds, by VDI ref, why destroyDisks could not destroy a disk of a
+	// VM that was not restored, for that disk's own record.
+	notDestroyed map[string]error
 }
 
 func NewExporter(ctx context.Context, opts *connectors.Options, name string, config map[string]string) (exporter.Exporter, error) {
@@ -210,13 +213,16 @@ func (p *Exporter) Export(ctx context.Context, records <-chan *connectors.Record
 	}
 
 	// A disk is restored as part of its VM. One that no vm.json lists would be left
-	// with no VM, so it goes; one whose VM failed is already gone with it. No path in
+	// with no VM, so it goes; one whose VM failed is already gone with it, unless its
+	// destroy failed, which its record then says. No path in
 	// the messages: plakar prefixes every record error with it.
 	errs := make([]error, len(disks))
 	var unowned []string
 	for i, d := range disks {
 		var err error
 		switch {
+		case owned[d.key] && failed[d.dir] && p.notDestroyed[d.ref] != nil:
+			err = fmt.Errorf("its VM was not restored, see %s; destroying VDI %s failed: %w", xapi.MetaFilename, d.ref, p.notDestroyed[d.ref])
 		case owned[d.key] && failed[d.dir]:
 			err = fmt.Errorf("its VM was not restored, see %s; the disk's VDI was destroyed with it", xapi.MetaFilename)
 		case owned[d.key]:
@@ -700,9 +706,16 @@ func (p *Exporter) destroyDisks(ctx context.Context, vm pendingVM, restored map[
 	}
 	failed := p.destroyVDIs(ctx, refs)
 	for _, ref := range refs {
-		if err := failed[ref]; err != nil {
-			errs = append(errs, fmt.Errorf("destroying restored VDI %s: %w", ref, err))
+		err := failed[ref]
+		if err == nil {
+			delete(p.notDestroyed, ref)
+			continue
 		}
+		if p.notDestroyed == nil {
+			p.notDestroyed = map[string]error{}
+		}
+		p.notDestroyed[ref] = err
+		errs = append(errs, fmt.Errorf("destroying restored VDI %s: %w", ref, err))
 	}
 	return errors.Join(errs...)
 }
