@@ -618,3 +618,37 @@ func TestHeldVDIErrorWithoutWatchdog(t *testing.T) {
 		t.Fatalf("error %v says a lost watchdog tries again", err)
 	}
 }
+
+// A watchdog still at work when closeWait runs out is left to finish by itself, and
+// the user is told, with the restore ID: Close no longer holds plakar for it (#85).
+func TestCloseDoesNotWaitLongForTheWatchdog(t *testing.T) {
+	old := closeWait
+	closeWait = 50 * time.Millisecond
+	t.Cleanup(func() { closeWait = old })
+	p := restoreExporter(t, &restoreXAPI{})
+	running := make(chan struct{})
+	t.Cleanup(func() { close(running) })
+	p.watchdog = watchdog.FromWriterUntil(&recordWatchdog{}, running)
+
+	var err error
+	start := time.Now()
+	out := stderrOf(t, func() { err = p.Close(context.Background()) })
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("Close took %s, want about closeWait", took)
+	}
+	if err != nil && strings.Contains(err.Error(), "did not exit") {
+		t.Fatalf("Close = %v: a watchdog going on by itself is not an error", err)
+	}
+	if !strings.Contains(out, "in the background") || !strings.Contains(out, p.restoreID()) {
+		t.Fatalf("not said that the watchdog goes on, with the restore ID:\n%s", out)
+	}
+}
+
+// One that exits in time says nothing.
+func TestCloseSaysNothingWhenTheWatchdogExits(t *testing.T) {
+	p, _ := recordedExporter(t, &restoreXAPI{})
+	out := stderrOf(t, func() { _ = p.Close(context.Background()) })
+	if out != "" {
+		t.Fatalf("said %q", out)
+	}
+}

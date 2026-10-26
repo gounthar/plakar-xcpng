@@ -298,7 +298,12 @@ and `pending_task_timeout` in xapi's `xapi_globs.ml`). A cleanup that fails whil
 watchdog tries it once more when the exporter exits. A VDI xapi still holds (`VDI_IN_USE`,
 as after an import whose connection was cut) is retried by the exporter itself, all of a VM's held disks together, for up to
 3 minutes; what is still held then, or held when the restore was interrupted, is left to the watchdog, and the disk's
-error says so. The watchdog reports each object it destroys as left by the restore, interrupted or not. What a killed watchdog, or a
+error says so. The exporter waits 30 s for the watchdog when it closes, which covers the usual hold
+of about a second; a watchdog still at work then goes on in the background, and the exporter says so with
+the restore ID, so a disk held for long does not keep `plakar restore` running for the watchdog's
+10 minutes (#85: 13 min with a disk held by dom0). Where plakar's exit kills what it leaves running
+(`KillMode=mixed`, a container whose first process is plakar), what the watchdog had not destroyed
+stays, named by that ID. The importer still waits for its watchdog. The watchdog reports each object it destroys as left by the restore, interrupted or not. What a killed watchdog, or a
 machine that loses power, leaves behind is named by the label or by the disk's file
 name (`<n>-<VDI UUID>.raw`). Starting the watchdog prints the restore ID,
 `plakar-restore-<time>-<random>`, which every label starts with and every restored VDI's
