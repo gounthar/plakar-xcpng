@@ -247,9 +247,14 @@ func (p *Exporter) destroyListed(ctx context.Context, keys []string) error {
 	var busy []string
 	last := map[string]error{}
 	try := func(key string) {
-		// Once the watchdog's time is up, name what is left instead of trying it.
+		// Once the watchdog's time is up, name what is left instead of trying it: by
+		// why it was put aside if it was, as the time can run out while it waits.
 		if ctx.Err() != nil {
-			errs = append(errs, fmt.Errorf("%s: not tried, the watchdog's time was up", key))
+			if last[key] != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", key, last[key]))
+			} else {
+				errs = append(errs, fmt.Errorf("%s: not tried, the watchdog's time was up", key))
+			}
 			return
 		}
 		switch err := p.destroyKey(ctx, key); {
