@@ -195,7 +195,7 @@ func destroyLeftovers(ctx context.Context, config map[string]string, keys []stri
 	}
 	p := &Exporter{cfg: cfg, client: client}
 	err = p.destroyListed(ctx, keys)
-	logOut(ctx, client)
+	watchdog.LogOut(ctx, client)
 	return err
 }
 
@@ -208,18 +208,6 @@ func notTried(err error, keys []string) error {
 	}
 	return errors.Join(errs...)
 }
-
-// logOut closes the watchdog's session, with a few seconds of its own: ctx may be over
-// already, the watchdog's time spent on a VDI xapi kept. Its error is dropped, as the
-// session goes with the process anyway and xapi ends it in time.
-func logOut(ctx context.Context, client *xapi.Client) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), logoutTimeout)
-	defer cancel()
-	_ = client.Close(ctx)
-}
-
-// logoutTimeout bounds the watchdog's logout.
-const logoutTimeout = 5 * time.Second
 
 // destroyListed destroys what the watchdog still lists, VMs first: VM.destroy leaves
 // the VDIs, which then have no VBD left to hold them.

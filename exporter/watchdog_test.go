@@ -554,7 +554,7 @@ func TestWatchdogLogsOutPastItsTime(t *testing.T) {
 	p := restoreExporter(t, f)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	logOut(ctx, p.client)
+	watchdog.LogOut(ctx, p.client)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.logouts != 1 {

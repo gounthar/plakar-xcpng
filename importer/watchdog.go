@@ -53,7 +53,9 @@ func destroyLeftovers(ctx context.Context, config map[string]string, uuids []str
 		return err
 	}
 	p := &Importer{cfg: cfg, client: client}
-	return errors.Join(p.destroyListed(ctx, uuids), client.Close(ctx))
+	err = p.destroyListed(ctx, uuids)
+	watchdog.LogOut(ctx, client)
+	return err
 }
 
 // destroyListed destroys what the watchdog still lists: snapshots by UUID, and by
