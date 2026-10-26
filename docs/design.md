@@ -307,7 +307,8 @@ stays, named by that ID. The importer still waits for its watchdog. The watchdog
 machine that loses power, leaves behind is named by the label or by the disk's file
 name (`<n>-<VDI UUID>.raw`). Starting the watchdog prints the restore ID,
 `plakar-restore-<time>-<random>`, which every label starts with and every restored VDI's
-description holds. It has to be said then: Ctrl-C ends the exporter at once, since it is in
+description holds until its VM is kept: a disk gets its saved name and description only then,
+so one xapi still holds when its VM fails is left with the ID (#90). It has to be said then: Ctrl-C ends the exporter at once, since it is in
 plakar's process group, so once the watchdog is killed too, no process is left to say it
 (#56: disk 0 left, nothing printed). A watchdog whose 10 minutes run out names each object
 it could not destroy and why, then says it stopped trying and where those objects are
