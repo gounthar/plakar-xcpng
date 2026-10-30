@@ -39,8 +39,8 @@ plakar at /path/to/store restore -to @pool <snapshot>
 Once there are releases, pushing a `v*` tag (a semantic version, such as `v0.2.0` or
 `v0.2.0-rc.1`) runs the CI checks, then builds `linux/amd64`, `linux/arm64` and
 `linux/riscv64` packages with plakar 1.1.7 and attaches them to a GitHub release with a
-`SHA256SUMS` file. A tag with a `-` suffix makes a pre-release. The packages are not
-signed yet.
+`SHA256SUMS` file. A tag containing `-`, such as `v0.2.0-rc.1`, makes a pre-release. The
+packages are not signed yet.
 
 ## What a backup leaves on the pool
 
@@ -81,13 +81,14 @@ xe snapshot-list params=uuid,name-label,snapshot-time | grep -B1 -A1 -E 'name-la
 
 ## What a restore leaves on the pool
 
-A new VM with its disks, and nothing else. A restore never overwrites an existing VM. When
-it starts, a restore prints its ID, `plakar-restore-<time>-<random>`. If it fails or is
-interrupted, a watchdog process destroys what it had created; a disk xapi still holds is
-retried, in the background once plakar has exited, for up to 10 minutes. What is left after
-that (the watchdog killed, the machine powered off, or a disk held longer) is named by that
-ID: VMs whose `other_config:plakar_restore` starts with it, and VDIs no VM uses whose name
-or description holds it. Details in `docs/design.md`.
+A new VM with its disks, its network interfaces and, when the backup has one, its vTPM. A
+restore never overwrites an existing VM. When it starts, a restore prints its ID,
+`plakar-restore-<time>-<random>`. If it fails or is interrupted, what it had created is
+destroyed. A disk xapi still holds is retried by the restore for up to 3 minutes, then by
+a watchdog process, in the background once plakar has exited, for up to 10 more. What is
+left after that (the watchdog killed, the machine powered off, or a disk held longer) is
+named by that ID: VMs whose `other_config:plakar_restore` starts with it, and VDIs no VM
+uses whose name or description holds it. Details in `docs/design.md`.
 
 ## Background
 
