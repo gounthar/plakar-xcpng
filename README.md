@@ -9,7 +9,7 @@ work. It is not a Vates product, and Vates does not support it.
 
 ## Status
 
-Prototype. The connector backs up and restores a VM end to end through plakar 1.1.7, on
+Prototype. The connector backs up and restores a VM end to end through plakar 1.1.8, on
 XCP-ng 8.3. It talks to xapi directly; Xen Orchestra is not needed. One run on a single
 test VM (8 GiB disk, 3.4 GiB of files), each backup reading the whole disk:
 
