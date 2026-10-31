@@ -64,7 +64,8 @@ architecture and `SHA256SUMS` from the
 
 ```sh
 sha256sum -c --ignore-missing SHA256SUMS
-plakar pkg add -allow-unsigned ./xcpng_v0.1.0_linux_amd64.ptar
+arch=amd64                 # or arm64, riscv64
+plakar pkg add -allow-unsigned "./xcpng_v0.1.0_linux_${arch}.ptar"
 ```
 
 PlakarKorp publishes no riscv64 plakar binary; the release notes say how to build one.
@@ -74,6 +75,7 @@ To build the package from source instead (Go 1.26.10):
 ```sh
 make build                 # xcpngImporter, xcpngExporter
 make package               # xcpng_<version>_<os>_<arch>.ptar
+plakar pkg add -allow-unsigned "./xcpng_v0.1.0_$(go env GOOS)_$(go env GOARCH).ptar"
 ```
 
 Then back up and restore:
