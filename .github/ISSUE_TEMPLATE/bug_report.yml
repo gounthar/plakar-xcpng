@@ -12,7 +12,7 @@ body:
     attributes:
       label: plakar version
       description: Output of `plakar version`
-      placeholder: plakar/v1.1.7
+      placeholder: plakar/v1.1.8
     validations:
       required: true
   - type: input
