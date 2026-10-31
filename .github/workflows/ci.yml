@@ -102,7 +102,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: go build ./...
 
-  # Install the package with plakar 1.1.7 for the same architecture on a native runner
+  # Install the package with plakar 1.1.8 for the same architecture on a native runner
   # and make plakar start the importer. There is no pool to reach from here, so
   # the importer's login error is the expected result: it proves plakar ran the
   # plugin binary and spoke to it over gRPC.
@@ -112,9 +112,9 @@ jobs:
     name: Build plakar linux/riscv64
     runs-on: ubuntu-24.04
     env:
-      PLAKAR_VERSION: 1.1.7
-      # Commit the v1.1.7 tag points to; the build stops if the tag moves.
-      PLAKAR_COMMIT: c8d93c212ab21d1bdc4a85f0120cedfa246504a1
+      PLAKAR_VERSION: 1.1.8
+      # Commit the v1.1.8 tag points to; the build stops if the tag moves.
+      PLAKAR_COMMIT: 4ded890fd4fb48f539ea95bf52911942b9269cb1
     steps:
       # The binary depends only on the plakar commit, so a cache hit skips the
       # checkout, Go setup and build. The key holds the commit, which is what
@@ -169,17 +169,17 @@ jobs:
         include:
           - goarch: amd64
             runner: ubuntu-24.04
-            # sha256 of plakar_1.1.7_linux_amd64.tar.gz, from the release's checksums file.
-            plakar_sha256: 95a6a36546064df033a8f9bae0837c625de3fbcb209b9795d7f2034a733e85fa
+            # sha256 of plakar_1.1.8_linux_amd64.tar.gz, from the release's checksums file.
+            plakar_sha256: 67c6237eb26ef2cb864941e8444b8877fa6531a0fc9b2a332653b455ea2831b4
           - goarch: arm64
             runner: ubuntu-24.04-arm
-            # sha256 of plakar_1.1.7_linux_arm64.tar.gz, from the release's checksums file.
-            plakar_sha256: b2886861abcce04ad8098317f3b5259905285287438aeff22d544a8cff18fc66
+            # sha256 of plakar_1.1.8_linux_arm64.tar.gz, from the release's checksums file.
+            plakar_sha256: bf368df15f325e6e59ca21d574e1b7d0c78f52e63221cfc3e7b59b3f31a1db1b
           # RISE runner, one fresh board per job. plakar comes from plakar-riscv64.
           - goarch: riscv64
             runner: ubuntu-24.04-riscv
     env:
-      PLAKAR_VERSION: 1.1.7
+      PLAKAR_VERSION: 1.1.8
     steps:
       # This job runs downloaded binaries; keep the token out of .git/config.
       - uses: actions/checkout@v7

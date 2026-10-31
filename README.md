@@ -9,7 +9,7 @@ work. It is not a Vates product, and Vates does not support it.
 
 ## Status
 
-Prototype. The connector backs up and restores a VM end to end through plakar 1.1.7, on
+Prototype. The connector backs up and restores a VM end to end through plakar 1.1.8, on
 XCP-ng 8.3. It talks to xapi directly; Xen Orchestra is not needed. One run on a single
 test VM (8 GiB disk, 3.4 GiB of files), each backup reading the whole disk:
 
@@ -71,7 +71,7 @@ plakar at /path/to/store restore -to @pool <snapshot>
 
 Once there are releases, pushing a `v*` tag (a semantic version, such as `v0.2.0` or
 `v0.2.0-rc.1`) runs the CI checks, then builds `linux/amd64`, `linux/arm64` and
-`linux/riscv64` packages with plakar 1.1.7 and attaches them to a GitHub release with a
+`linux/riscv64` packages with plakar 1.1.8 and attaches them to a GitHub release with a
 `SHA256SUMS` file. A tag containing `-`, such as `v0.2.0-rc.1`, makes a pre-release. The
 packages are not signed yet.
 

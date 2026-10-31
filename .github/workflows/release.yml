@@ -9,9 +9,9 @@ permissions:
   contents: read
 
 env:
-  PLAKAR_VERSION: 1.1.7
-  # sha256 of plakar_1.1.7_linux_amd64.tar.gz, from the release's checksums file.
-  PLAKAR_SHA256: 95a6a36546064df033a8f9bae0837c625de3fbcb209b9795d7f2034a733e85fa
+  PLAKAR_VERSION: 1.1.8
+  # sha256 of plakar_1.1.8_linux_amd64.tar.gz, from the release's checksums file.
+  PLAKAR_SHA256: 67c6237eb26ef2cb864941e8444b8877fa6531a0fc9b2a332653b455ea2831b4
 
 jobs:
   ci:
