@@ -45,50 +45,7 @@ later variant, not a requirement.
 
 ## Configuration
 
-Shared by importer and exporter:
-
-| Key | Meaning |
-|---|---|
-| `location` | `xcpng://host[:port]` of the pool master |
-| `username` | XAPI user, usually `root` |
-| `password` | XAPI password. Plakar stores connector configuration in its own config store; never put it in this repository |
-| `tls_insecure` | `true` to skip TLS certificate verification. XCP-ng ships a self-signed certificate by default |
-
-Importer selection, exactly one of:
-
-| Key | Meaning |
-|---|---|
-| `vm_uuid` | one VM by UUID |
-| `vm_name` | every VM whose name-label is exactly this |
-| `vm_tag` | every VM carrying this tag |
-
-With `vm_name` or `vm_tag`, the VMs are backed up one after another into one snapshot, and
-an error on any of them fails the whole run: plakar commits no snapshot and exits 1, so
-the VMs already read are not kept either. This is deliberate. A failed VM could instead
-be recorded as an error entry in a snapshot that keeps the others, but plakar 1.1.7 then
-exits 0, and a scheduled backup that lost a VM would look successful: `restore` and
-`check` of that snapshot also succeed without mentioning it, and only `plakar info`
-counts the error. To keep one
-failing VM from holding back the rest, give each VM its own source (`vm_uuid`).
-
-Importer options:
-
-| Key | Meaning |
-|---|---|
-| `stale_snapshot_age` | destroy leftover snapshots older than this, default `24h`, `0` disables |
-| `vtpm` | `include` or `skip` the VM's vTPM state. No default: a VM with a vTPM is refused until it is set (see below) |
-
-Exporter:
-
-| Key | Meaning |
-|---|---|
-| `sr_uuid` | SR to create the restored VDIs on. Defaults to the pool's default SR |
-| `name_suffix` | appended to the restored VM's name-label, default ` (restored)` |
-| `start_on_restore` | start the VM once restored, default `false` |
-| `keep_mac` | give the VIFs their original MAC addresses, default `false` |
-| `keep_tags` | give the VM the original's tags, default `false` |
-| `keep_secureboot_update` | let the target pool replace the VM's Secure Boot keys at next boot, default `false` (see below) |
-| `allow_incomplete_disks` | restore a VM whose backup holds a disk shorter than the disk was, default `false` (see below) |
+The keys, their defaults and what they do are listed in the README, under "Configuration".
 
 ## Backup (importer)
 
