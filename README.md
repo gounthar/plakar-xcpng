@@ -57,19 +57,35 @@ rather than XVA (see Background). More in `docs/design.md`.
 
 ## Build and install
 
-There is no release yet: build the package from source (Go 1.26).
+Install plakar itself from [PlakarKorp's releases](https://github.com/PlakarKorp/plakar/releases);
+this repository ships only the `.ptar` plugin package. Download the package for your
+architecture and `SHA256SUMS` from the
+[v0.1.0 release](https://github.com/gounthar/plakar-xcpng/releases/tag/v0.1.0), then:
+
+```sh
+sha256sum -c --ignore-missing SHA256SUMS
+plakar pkg add -allow-unsigned ./xcpng_v0.1.0_linux_amd64.ptar
+```
+
+PlakarKorp publishes no riscv64 plakar binary; the release notes say how to build one.
+
+To build the package from source instead (Go 1.26.10):
 
 ```sh
 make build                 # xcpngImporter, xcpngExporter
 make package               # xcpng_<version>_<os>_<arch>.ptar
-plakar pkg add -allow-unsigned ./xcpng_v0.1.0_linux_amd64.ptar
+```
+
+Then back up and restore:
+
+```sh
 plakar source add myvm xcpng://pool-master password=... tls_insecure=true vm_uuid=...
 plakar at /path/to/store backup @myvm
 plakar destination add pool xcpng://pool-master password=... tls_insecure=true
 plakar at /path/to/store restore -to @pool <snapshot>
 ```
 
-Once there are releases, pushing a `v*` tag (a semantic version, such as `v0.2.0` or
+Pushing a `v*` tag (a semantic version, such as `v0.2.0` or
 `v0.2.0-rc.1`) runs the CI checks, then builds `linux/amd64`, `linux/arm64` and
 `linux/riscv64` packages with plakar 1.1.8 and attaches them to a GitHub release with a
 `SHA256SUMS` file. A tag containing `-`, such as `v0.2.0-rc.1`, makes a pre-release. The
