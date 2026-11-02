@@ -1,0 +1,157 @@
+---
+# Moves the plakar CLI pins in the workflows to the latest PlakarKorp/plakar
+# release: the version, the sha256 of the linux amd64 and arm64 tarballs, and
+# the commit the riscv64 job builds from. Dependabot reads none of these lines.
+# Run by .github/workflows/updatecli.yml; locally:
+#   GITHUB_TOKEN=... GITHUB_ACTOR=... updatecli pipeline diff --config updatecli/plakar.yaml
+name: Track the plakar release pins
+
+scms:
+  github:
+    kind: github
+    spec:
+      owner: gounthar
+      repository: plakar-xcpng
+      branch: main
+      user: updatecli
+      email: updatecli@users.noreply.github.com
+      username: '{{ requiredEnv "GITHUB_ACTOR" }}'
+      token: '{{ requiredEnv "GITHUB_TOKEN" }}'
+
+actions:
+  pullrequest:
+    kind: github/pullrequest
+    scmid: github
+    spec:
+      title: 'chore(ci): move plakar to {{ source "version" }}'
+      labels:
+        - dependencies
+        - ci
+
+sources:
+  version:
+    name: Latest plakar release
+    kind: githubrelease
+    spec:
+      owner: PlakarKorp
+      repository: plakar
+      token: '{{ requiredEnv "GITHUB_TOKEN" }}'
+      versionfilter:
+        kind: semver
+    transformers:
+      - trimprefix: v
+
+  commit:
+    name: Commit of the release tag
+    kind: githubrelease
+    dependson:
+      - version
+    spec:
+      owner: PlakarKorp
+      repository: plakar
+      token: '{{ requiredEnv "GITHUB_TOKEN" }}'
+      key: taghash
+      versionfilter:
+        kind: regex
+        pattern: '^v{{ source "version" }}$'
+
+  sha256-amd64:
+    name: sha256 of the linux_amd64 tarball
+    kind: file
+    dependson:
+      - version
+    spec:
+      # yamllint disable-line rule:line-length
+      file: 'https://github.com/PlakarKorp/plakar/releases/download/v{{ source "version" }}/plakar_{{ source "version" }}_checksums.txt'
+      matchpattern: '[0-9a-f]{64}  plakar_[0-9.]+_linux_amd64\.tar\.gz'
+    transformers:
+      - findsubmatch:
+          pattern: '^([0-9a-f]{64})'
+          captureindex: 1
+
+  sha256-arm64:
+    name: sha256 of the linux_arm64 tarball
+    kind: file
+    dependson:
+      - version
+    spec:
+      # yamllint disable-line rule:line-length
+      file: 'https://github.com/PlakarKorp/plakar/releases/download/v{{ source "version" }}/plakar_{{ source "version" }}_checksums.txt'
+      matchpattern: '[0-9a-f]{64}  plakar_[0-9.]+_linux_arm64\.tar\.gz'
+    transformers:
+      - findsubmatch:
+          pattern: '^([0-9a-f]{64})'
+          captureindex: 1
+
+targets:
+  version:
+    name: PLAKAR_VERSION in the workflows
+    kind: file
+    scmid: github
+    sourceid: version
+    spec:
+      files:
+        - .github/workflows/ci.yml
+        - .github/workflows/release.yml
+      matchpattern: 'PLAKAR_VERSION: [0-9]+\.[0-9]+\.[0-9]+'
+      replacepattern: 'PLAKAR_VERSION: {{ source "version" }}'
+
+  commit:
+    name: PLAKAR_COMMIT in ci.yml
+    kind: file
+    scmid: github
+    sourceid: commit
+    spec:
+      file: .github/workflows/ci.yml
+      matchpattern: 'PLAKAR_COMMIT: [0-9a-f]{40}'
+      replacepattern: 'PLAKAR_COMMIT: {{ source "commit" }}'
+
+  sha256-amd64-ci:
+    name: amd64 sha256 in the ci.yml smoke matrix
+    kind: file
+    scmid: github
+    sourceid: sha256-amd64
+    spec:
+      file: .github/workflows/ci.yml
+      matchpattern: '(goarch: amd64\n(?:[^\n]*\n){0,3}?\s+plakar_sha256: )[0-9a-f]{64}'
+      replacepattern: '${1}{{ source "sha256-amd64" }}'
+
+  sha256-arm64-ci:
+    name: arm64 sha256 in the ci.yml smoke matrix
+    kind: file
+    scmid: github
+    sourceid: sha256-arm64
+    spec:
+      file: .github/workflows/ci.yml
+      matchpattern: '(goarch: arm64\n(?:[^\n]*\n){0,3}?\s+plakar_sha256: )[0-9a-f]{64}'
+      replacepattern: '${1}{{ source "sha256-arm64" }}'
+
+  sha256-amd64-release:
+    name: amd64 sha256 in release.yml
+    kind: file
+    scmid: github
+    sourceid: sha256-amd64
+    spec:
+      file: .github/workflows/release.yml
+      matchpattern: 'PLAKAR_SHA256: [0-9a-f]{64}'
+      replacepattern: 'PLAKAR_SHA256: {{ source "sha256-amd64" }}'
+
+  readme:
+    name: plakar version the release packages are built with, in the README
+    kind: file
+    scmid: github
+    sourceid: version
+    spec:
+      file: README.md
+      matchpattern: 'packages with plakar [0-9]+\.[0-9]+\.[0-9]+'
+      replacepattern: 'packages with plakar {{ source "version" }}'
+
+  issue-template:
+    name: plakar version placeholder in the bug report template
+    kind: file
+    scmid: github
+    sourceid: version
+    spec:
+      file: .github/ISSUE_TEMPLATE/bug_report.yml
+      matchpattern: 'placeholder: plakar/v[0-9]+\.[0-9]+\.[0-9]+'
+      replacepattern: 'placeholder: plakar/v{{ source "version" }}'

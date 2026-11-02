@@ -1,0 +1,47 @@
+---
+name: updatecli
+
+# Opens a pull request when PlakarKorp publishes a plakar release, moving the
+# version, checksums and tag commit pinned in ci.yml and release.yml
+# (updatecli/plakar.yaml). That pull request's CI runs the package smoke job
+# on amd64, arm64 and riscv64 against the new plakar.
+
+on:
+  schedule:
+    # Mondays, 07:23 UTC.
+    - cron: '23 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: updatecli
+  cancel-in-progress: false
+
+jobs:
+  plakar:
+    name: plakar release pins
+    runs-on: ubuntu-24.04
+    steps:
+      # GITHUB_TOKEN can do neither part of this job: GitHub refuses a push that
+      # touches .github/workflows from it, and a pull request it opens starts no
+      # workflows, so CI would never run on the new plakar.
+      - name: Check the token
+        env:
+          UPDATECLI_TOKEN: ${{ secrets.UPDATECLI_TOKEN }}
+        run: |
+          if [ -z "$UPDATECLI_TOKEN" ]; then
+            echo "::error::Secret UPDATECLI_TOKEN is not set (needs contents, pull requests and workflows write)."
+            exit 1
+          fi
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: updatecli/updatecli-action@v3.10.0
+        with:
+          version: v0.123.0
+      - name: Apply
+        env:
+          GITHUB_TOKEN: ${{ secrets.UPDATECLI_TOKEN }}
+        run: updatecli pipeline apply --config updatecli/plakar.yaml
