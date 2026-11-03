@@ -9,8 +9,9 @@ permissions:
   contents: read
 
 env:
+  # updatecli (updatecli/plakar.yaml) moves these pins together.
   PLAKAR_VERSION: 1.1.8
-  # sha256 of plakar_1.1.8_linux_amd64.tar.gz, from the release's checksums file.
+  # sha256 of the linux_amd64 tarball, from the release's checksums file.
   PLAKAR_SHA256: 67c6237eb26ef2cb864941e8444b8877fa6531a0fc9b2a332653b455ea2831b4
 
 jobs:
